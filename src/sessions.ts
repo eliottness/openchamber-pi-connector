@@ -8,6 +8,7 @@ import { appendFileSync, existsSync, readFileSync, readdirSync, statSync, unlink
 import { join } from "node:path";
 import { PiRpcClient } from "./pi-rpc.js";
 import { SessionLifecycle, type LifecycleOptions } from "./lifecycle.js";
+import { ApprovalBridge, extensionUiRequestFrom, type PendingPermission, type PendingQuestion } from "./approvals.js";
 import { getAgentName } from "./agent-name.js";
 import { mapTool, resultMetadata, resultText } from "./tool-map.js";
 import { ocIdFor, piSessionDir, piSessionsRootMtime, scanAllPiSessions, scanPiSessions, SessionStore, type ScannedSession } from "./session-store.js";
@@ -55,6 +56,7 @@ export interface ManagedSession {
    * *result* later, in turn_end.toolResults — matched by toolCallId.
    */
   toolByCallId: Map<string, OCToolPart>;
+  approvals?: ApprovalBridge;
   /** pi's own session id + file — the bridge to persistence/restore. */
   piSessionId?: string;
   piPath?: string;
@@ -150,6 +152,7 @@ export class SessionManager {
       hasRunningChildren: () => false,
       ...(piSessionId !== undefined ? { piSessionId } : {}),
     };
+    managed.approvals = this.approvalsFor(managed);
     this.sessions.set(info.id, managed);
     this.lifecycle.touch(managed);
     this.wirePi(managed, pi);
@@ -183,8 +186,15 @@ export class SessionManager {
       this.lifecycle.touch(s);
       this.onPiEvent(s, payload);
     });
+    pi.onExtensionUI((request) => {
+      if (s.pi !== pi) return;
+      this.lifecycle.touch(s);
+      const extensionRequest = extensionUiRequestFrom(request);
+      if (extensionRequest !== undefined) s.approvals?.handle(extensionRequest);
+    });
     pi.onExit((code) => {
       if (s.pi !== pi) return;
+      s.approvals?.finishTurn();
       void this.lifecycle.dormant(s).catch((error: unknown) => console.error("[lifecycle] exit cleanup failed:", error));
       this.setStatus(s, { type: "idle" });
       this.emit(s.info.directory, {
@@ -246,6 +256,7 @@ export class SessionManager {
   private async removeLive(sessionId: string): Promise<boolean> {
     const s = this.get(sessionId);
     if (!s) return false;
+    s.approvals?.cancelAll();
     this.sessions.delete(sessionId);
     this.emit(s.info.directory, { type: "session.deleted", properties: { info: s.info } });
     await this.lifecycle.dormant(s);
@@ -300,8 +311,39 @@ export class SessionManager {
     const s = this.get(sessionId);
     if (!s) return false;
     if (s.pi === undefined) return true; // dormant sessions are idle by definition
+    s.approvals?.cancelAll();
     await s.pi.command({ type: "abort" }).catch(() => undefined);
     return true;
+  }
+
+  permissions(sessionId?: string): PendingPermission[] {
+    return [...this.sessions.values()].flatMap((session) => (sessionId === undefined || session.info.id === sessionId ? session.approvals?.permissions() ?? [] : []));
+  }
+
+  questions(sessionId?: string): PendingQuestion[] {
+    return [...this.sessions.values()].flatMap((session) => (sessionId === undefined || session.info.id === sessionId ? session.approvals?.questions() ?? [] : []));
+  }
+
+  replyPermission(sessionID: string, requestID: string, reply: "once" | "always" | "reject", message?: string): boolean {
+    return this.get(sessionID)?.approvals?.replyPermission(requestID, reply, message) ?? false;
+  }
+
+  replyQuestion(sessionID: string, requestID: string, answers: Array<string[]>): boolean {
+    return this.get(sessionID)?.approvals?.replyQuestion(requestID, answers) ?? false;
+  }
+
+  rejectQuestion(sessionID: string, requestID: string): boolean {
+    return this.get(sessionID)?.approvals?.rejectQuestion(requestID) ?? false;
+  }
+
+  private approvalsFor(s: ManagedSession): ApprovalBridge {
+    s.hasPendingInteraction = () => s.approvals?.hasPending(s.info.id) ?? false;
+    return new ApprovalBridge(
+      s.info.id,
+      (event) => this.emit(s.info.directory, event as OCEvent),
+      (response) => s.pi?.respondExtensionUI(response),
+      () => s.streaming?.message.id ?? [...(s.messages ?? [])].reverse().find((m) => m.info.role === "assistant")?.info.id,
+    );
   }
 
   /**
@@ -460,6 +502,7 @@ export class SessionManager {
   }
 
   async disposeAll(): Promise<void> {
+    for (const s of this.sessions.values()) s.approvals?.cancelAll();
     await this.lifecycle.stop();
     this.sessions.clear();
   }
@@ -494,6 +537,7 @@ export class SessionManager {
     s.piPath = restored.piPath;
     s.piSessionId = restored.piSessionId;
     delete s.restored;
+    s.approvals = this.approvalsFor(s);
     // A restored session pushes pi's real model to the UI rather than leaving
     // the picker on whatever it last showed for this directory.
     this.applyPiModel(s, state.data.model?.provider, state.data.model?.id);
@@ -652,6 +696,7 @@ export class SessionManager {
 
       case "agent_end": {
         if (ev.willRetry === true) break; // auto-retry keeps the session busy
+        s.approvals?.finishTurn();
         this.finalizeDanglingTools(s);
         this.finishStreaming(s);
         this.setStatus(s, { type: "idle" });
@@ -661,6 +706,7 @@ export class SessionManager {
       }
 
       case "turn_end": {
+        s.approvals?.finishTurn();
         // pi delivers tool results here, matched back to parts by toolCallId.
         const results = ev.toolResults as Array<Record<string, unknown>> | undefined;
         if (Array.isArray(results)) this.applyToolResults(s, results);
@@ -668,6 +714,9 @@ export class SessionManager {
       }
 
       case "tool_execution_start": {
+        if (typeof ev.toolCallId === "string" && typeof ev.toolName === "string") {
+          s.approvals?.noteToolStart(ev.toolCallId, ev.toolName, ev.args);
+        }
         const callID = typeof ev.toolCallId === "string" ? ev.toolCallId : undefined;
         const part = callID !== undefined ? s.toolByCallId.get(callID) : undefined;
         if (part === undefined) break;
@@ -690,6 +739,7 @@ export class SessionManager {
       }
 
       case "tool_execution_end": {
+        if (typeof ev.toolCallId === "string") s.approvals?.noteToolEnd(ev.toolCallId);
         const result = ev.result !== null && typeof ev.result === "object" ? ev.result : {};
         this.applyToolResults(s, [{ ...result, toolCallId: ev.toolCallId, isError: ev.isError }]);
         break;

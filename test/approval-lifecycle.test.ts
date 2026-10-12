@@ -10,9 +10,42 @@ import { V2EventTranslator } from "../src/v2.js";
 import { SessionManager } from "../src/sessions.js";
 import { SessionStore } from "../src/session-store.js";
 import { systemClock } from "../src/lifecycle.js";
-import { once } from "node:events";
+import { EventEmitter } from "node:events";
 
 const options = ["Allow once", "Allow always", "Deny", "Deny with feedback"];
+
+function bounded<T>(promise: Promise<T>, label: string, ms = 5000): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`Timed out waiting for ${label} after ${ms}ms`)), ms);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error: unknown) => { clearTimeout(timer); reject(error); },
+    );
+  });
+}
+
+function waitFor<T>(emitter: EventEmitter, event: string, ms = 5000): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timer);
+      emitter.off(event, onEvent);
+      emitter.off("streamError", onError);
+    };
+    const onEvent = (value: T) => { cleanup(); resolve(value); };
+    const onError = (error: unknown) => { cleanup(); reject(error); };
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timed out waiting for ${event} after ${ms}ms`));
+    }, ms);
+    emitter.once(event, onEvent);
+    emitter.once("streamError", onError);
+  });
+}
+
+function request(url: string, init?: RequestInit): Promise<Response> {
+  return fetch(url, { ...init, signal: AbortSignal.timeout(5000) });
+}
+
 function harness() {
   const events: ApprovalEvent[] = [];
   const responses: Record<string, unknown>[] = [];
@@ -120,22 +153,18 @@ test("turn end clears stale metadata and pending cards without cancelling OmO", 
 
 test("OmO request timeout clears the card on its rejection event", async () => {
   const responses: Record<string, unknown>[] = [];
-  let bridge: ApprovalBridge;
-  const expired = new Promise<void>((resolve) => {
-    bridge = new ApprovalBridge("ses_test", (event) => {
-      if (event.type === "question.rejected") resolve();
-    }, (response) => responses.push(response), () => "msg_test");
-    const request = extensionUiRequestFrom({ id: "timeout", method: "input", title: "Timed", timeout: 1 });
-    assert.ok(request);
-    bridge.handle(request);
-  });
-  // Keep the test alive with a bounded guard; the request timer is the behavior under test.
-  const guard = setTimeout(() => assert.fail("request expiration was not emitted"), 1000);
+  const events = new EventEmitter();
+  const expired = waitFor(events, "question.rejected");
+  const bridge = new ApprovalBridge("ses_test", (event) => events.emit(event.type, event),
+    (response) => responses.push(response), () => "msg_test");
   try {
+    const parsed = extensionUiRequestFrom({ id: "timeout", method: "input", title: "Timed", timeout: 1 });
+    assert.ok(parsed);
+    bridge.handle(parsed);
     await expired;
     assert.equal(responses.length, 0);
   } finally {
-    clearTimeout(guard);
+    bridge.cancelAll();
   }
 });
 
@@ -151,23 +180,27 @@ test("v2 SSE permission uses native action resources source and event type", () 
   assert.deepEqual(frame?.data.source, { type: "tool", messageID: "msg_test", callID: "call" });
 });
 
-test("real RPC transport forwards blocking requests without auto-cancellation", { timeout: 10000 }, async () => {
+test("real RPC transport forwards blocking requests without auto-cancellation", { timeout: 20000 }, async (t) => {
   const pi = new PiRpcClient({ cwd: tmpdir(), piBinary: new URL("./fixtures/approval-rpc.mjs", import.meta.url).pathname });
+  t.after(() => bounded(pi.dispose(), "RPC process teardown", 10000));
   try {
-    const emitted = new Promise<Record<string, unknown>>((resolve) => pi.onExtensionUI(resolve));
-    await pi.command({ type: "emit_ui", request: { id: "blocking", method: "select", title: "Permission required: read", options } });
-    assert.equal((await emitted).id, "blocking");
-    const before = await pi.command<{ responses: unknown[] }>({ type: "get_state" });
+    const emitted = waitFor<Record<string, unknown>>(pi, "extension_ui_request");
+    const [, event] = await Promise.all([
+      pi.command({ type: "emit_ui", request: { id: "blocking", method: "select", title: "Permission required: read", options } }, 5000),
+      emitted,
+    ]);
+    assert.equal(event.id, "blocking");
+    const before = await pi.command<{ responses: unknown[] }>({ type: "get_state" }, 5000);
     assert.deepEqual(before.data?.responses, []);
     pi.respondExtensionUI({ type: "extension_ui_response", id: "blocking", value: "Allow once" });
-    const after = await pi.command<{ responses: unknown[] }>({ type: "get_state" });
+    const after = await pi.command<{ responses: unknown[] }>({ type: "get_state" }, 5000);
     assert.deepEqual(after.data?.responses, [{ type: "extension_ui_response", id: "blocking", value: "Allow once" }]);
   } finally {
-    await pi.dispose();
+    await bounded(pi.dispose(), "RPC process teardown", 10000);
   }
 });
 
-test("HTTP v1 v2 lists replies malformed input unknown IDs and abort", { timeout: 15000 }, async () => {
+test("HTTP v1 v2 lists replies malformed input unknown IDs and abort", { timeout: 20000 }, async (t) => {
   const root = mkdtempSync(join(tmpdir(), "approval-http-"));
   const keys = ["OCPI_PI_BINARY", "OCPI_STATE_DIR", "PI_CODING_AGENT_DIR"] as const;
   const previous = keys.map((key) => process.env[key]);
@@ -176,18 +209,24 @@ test("HTTP v1 v2 lists replies malformed input unknown IDs and abort", { timeout
   process.env.PI_CODING_AGENT_DIR = root;
   const server = new AdapterServer({ host: "127.0.0.1", port: 0, defaultDirectory: root });
   const signal = new AbortController();
+  let reading: Promise<void> = Promise.resolve();
+  t.after(() => {
+    signal.abort();
+    return bounded(server.stop(), "HTTP server teardown", 10000);
+  });
   try {
-    await server.start();
-    const session = await (await fetch(`${server.url}/session`, { method: "POST", body: "{}" })).json() as { id: string };
-    const stream = await fetch(`${server.url}/event`, { signal: signal.signal });
+    await bounded(server.start(), "HTTP server startup");
+    const session = await (await request(`${server.url}/session`, { method: "POST", body: "{}" })).json() as { id: string };
+    const stream = await bounded(fetch(`${server.url}/event`, { signal: signal.signal }), "SSE connection");
     const reader = stream.body?.getReader();
     assert.ok(reader);
     let buffer = "";
-    const waiters = new Map<string, () => void>();
-    const reading = (async () => {
+    const events = new EventEmitter();
+    let streamError: unknown;
+    reading = (async () => {
       try {
         for (;;) {
-          const next = await reader.read();
+          const next = await bounded(reader.read(), "SSE frame");
           if (next.done) return;
           buffer += new TextDecoder().decode(next.value);
           let end: number;
@@ -196,52 +235,72 @@ test("HTTP v1 v2 lists replies malformed input unknown IDs and abort", { timeout
             buffer = buffer.slice(end + 2);
             if (frame.startsWith("data: ")) {
               const event = JSON.parse(frame.slice(6)) as { type: string };
-              waiters.get(event.type)?.();
+              events.emit(event.type, event);
             }
           }
         }
       } catch (error) {
-        if (!signal.signal.aborted) throw error;
+        if (!signal.signal.aborted) {
+          streamError = error;
+          events.emit("streamError", error);
+        }
       }
     })();
-    const asked = new Promise<void>((resolve) => waiters.set("permission.asked", resolve));
-    await fetch(`${server.url}/session/${session.id}/prompt_async`, { method: "POST", body: JSON.stringify({ parts: [{ type: "text", text: "permission" }] }) });
-    await asked;
-    const pending = await (await fetch(`${server.url}/permission`)).json() as Array<{ id: string }>;
+    const asked = waitFor(events, "permission.asked");
+    await Promise.all([
+      request(`${server.url}/session/${session.id}/prompt_async`, { method: "POST", body: JSON.stringify({ parts: [{ type: "text", text: "permission" }] }) }),
+      asked,
+    ]);
+    const pending = await (await request(`${server.url}/permission`)).json() as Array<{ id: string }>;
     assert.equal(pending.length, 1);
-    const v2 = await (await fetch(`${server.url}/api/permission/request`)).json() as { data: Array<{ action: string; resources: string[] }> };
+    const v2 = await (await request(`${server.url}/api/permission/request`)).json() as { data: Array<{ action: string; resources: string[] }> };
     assert.equal(v2.data[0]?.action, "read");
     assert.deepEqual(v2.data[0]?.resources, ["/tmp/fixture"]);
-    assert.equal((await fetch(`${server.url}/permission/missing/reply`, { method: "POST", body: '{"reply":"once"}' })).status, 404);
-    assert.equal((await fetch(`${server.url}/permission/${pending[0]?.id}/reply`, { method: "POST", body: '{"reply":"not-real"}' })).status, 400);
-    const replied = new Promise<void>((resolve) => waiters.set("permission.replied", resolve));
-    assert.equal((await fetch(`${server.url}/api/session/${session.id}/permission/${pending[0]?.id}/reply`, { method: "POST", body: '{"reply":"once"}' })).status, 204);
-    await replied;
-    assert.deepEqual(await (await fetch(`${server.url}/permission`)).json(), []);
-    const questionAsked = new Promise<void>((resolve) => waiters.set("question.asked", resolve));
-    await fetch(`${server.url}/session/${session.id}/prompt_async`, { method: "POST", body: JSON.stringify({ parts: [{ type: "text", text: "question" }] }) });
-    await questionAsked;
-    const questions = await (await fetch(`${server.url}/api/question/request`)).json() as { data: Array<{ id: string }> };
+    assert.equal((await request(`${server.url}/permission/missing/reply`, { method: "POST", body: '{"reply":"once"}' })).status, 404);
+    assert.equal((await request(`${server.url}/permission/${pending[0]?.id}/reply`, { method: "POST", body: '{"reply":"not-real"}' })).status, 400);
+    const replied = waitFor(events, "permission.replied");
+    const [reply] = await Promise.all([
+      request(`${server.url}/api/session/${session.id}/permission/${pending[0]?.id}/reply`, { method: "POST", body: '{"reply":"once"}' }),
+      replied,
+    ]);
+    assert.equal(reply.status, 204);
+    assert.deepEqual(await (await request(`${server.url}/permission`)).json(), []);
+    const questionAsked = waitFor(events, "question.asked");
+    await Promise.all([
+      request(`${server.url}/session/${session.id}/prompt_async`, { method: "POST", body: JSON.stringify({ parts: [{ type: "text", text: "question" }] }) }),
+      questionAsked,
+    ]);
+    const questions = await (await request(`${server.url}/api/question/request`)).json() as { data: Array<{ id: string }> };
     assert.equal(questions.data.length, 1);
-    const rejected = new Promise<void>((resolve) => waiters.set("question.rejected", resolve));
-    await fetch(`${server.url}/session/${session.id}/abort`, { method: "POST" });
-    await rejected;
-    assert.deepEqual(await (await fetch(`${server.url}/question`)).json(), []);
-    assert.equal((await fetch(`${server.url}/question/missing/reject`, { method: "POST" })).status, 404);
+    const rejected = waitFor(events, "question.rejected");
+    await Promise.all([
+      request(`${server.url}/session/${session.id}/abort`, { method: "POST" }),
+      rejected,
+    ]);
+    assert.deepEqual(await (await request(`${server.url}/question`)).json(), []);
+    assert.equal((await request(`${server.url}/question/missing/reject`, { method: "POST" })).status, 404);
     signal.abort();
-    await reading;
+    await bounded(reading, "SSE shutdown");
+    assert.equal(streamError, undefined);
   } finally {
     signal.abort();
-    await server.stop();
-    keys.forEach((key, index) => {
-      if (previous[index] === undefined) delete process.env[key];
-      else process.env[key] = previous[index];
-    });
-    rmSync(root, { recursive: true, force: true });
+    try {
+      await bounded(reading, "SSE shutdown");
+    } finally {
+      try {
+        await bounded(server.stop(), "HTTP server teardown", 10000);
+      } finally {
+        keys.forEach((key, index) => {
+          if (previous[index] === undefined) delete process.env[key];
+          else process.env[key] = previous[index];
+        });
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
   }
 });
 
-test("real session pending-interaction hook prevents idle reaping until the reply", { timeout: 10000 }, async () => {
+test("real session pending-interaction hook prevents idle reaping until the reply", { timeout: 20000 }, async (t) => {
   const root = mkdtempSync(join(tmpdir(), "approval-reaper-"));
   const binary = new URL("./fixtures/approval-rpc.mjs", import.meta.url).pathname;
   const previous = process.env.OCPI_PI_BINARY;
@@ -250,29 +309,35 @@ test("real session pending-interaction hook prevents idle reaping until the repl
   const manager = new SessionManager(() => undefined, new SessionStore(root), root, {
     clock: { ...systemClock, now: () => time }, idleTimeoutMs: 100, maxLive: 1,
   });
+  t.after(() => bounded(manager.disposeAll(), "session process teardown", 10000));
   try {
-    const info = await manager.create(root);
+    const info = await bounded(manager.create(root), "session creation");
     const session = manager.get(info.id);
     assert.ok(session?.pi);
     session.piPath = binary;
-    const asked = once(session.pi, "extension_ui_request", { signal: AbortSignal.timeout(5000) });
-    await session.pi.command({ type: "emit_ui", request: {
-      id: "reap-pending", method: "select", title: "Permission required: read", options, toolCallId: "call",
-    } });
-    await asked;
+    const asked = waitFor(session.pi, "extension_ui_request");
+    await Promise.all([
+      session.pi.command({ type: "emit_ui", request: {
+        id: "reap-pending", method: "select", title: "Permission required: read", options, toolCallId: "call",
+      } }, 5000),
+      asked,
+    ]);
     assert.equal(session.status.type, "idle");
     assert.equal(session.hasPendingInteraction(), true);
     time = 100;
-    await manager.lifecycle.reap();
+    await bounded(manager.lifecycle.reap(), "pending session reap", 10000);
     assert.ok(session.pi, "pending approval must keep the expired idle process alive");
     manager.replyPermission(info.id, "reap-pending", "once");
     assert.equal(session.hasPendingInteraction(), false);
-    await manager.lifecycle.reap();
+    await bounded(manager.lifecycle.reap(), "replied session reap", 10000);
     assert.equal(session.pi, undefined);
   } finally {
-    await manager.disposeAll();
-    if (previous === undefined) delete process.env.OCPI_PI_BINARY;
-    else process.env.OCPI_PI_BINARY = previous;
-    rmSync(root, { recursive: true, force: true });
+    try {
+      await bounded(manager.disposeAll(), "session process teardown", 10000);
+    } finally {
+      if (previous === undefined) delete process.env.OCPI_PI_BINARY;
+      else process.env.OCPI_PI_BINARY = previous;
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });

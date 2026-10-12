@@ -102,12 +102,12 @@ function liveRecord(store: string, id = "st_child", status = "running", text = "
 
 function eventWhen(bus: EventEmitter, predicate: (event: OCEvent) => boolean): Promise<OCEvent> {
   return new Promise((resolve, reject) => {
-    const signal = AbortSignal.timeout(5000);
-    const cleanup = () => { bus.off("event", listener); signal.removeEventListener("abort", timeout); };
+    const cleanup = () => { bus.off("event", listener); clearTimeout(timer); };
     const timeout = () => { cleanup(); reject(new Error("Expected bridge event was not emitted")); };
     const listener = (event: OCEvent) => { if (predicate(event)) { cleanup(); resolve(event); } };
     bus.on("event", listener);
-    signal.addEventListener("abort", timeout, { once: true });
+    // The bridge watchers are nonpersistent; this wait must keep its deadline alive.
+    const timer = setTimeout(timeout, 5000);
   });
 }
 

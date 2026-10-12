@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { PiRpcClient } from "./pi-rpc.js";
 import { SessionLifecycle, type LifecycleOptions } from "./lifecycle.js";
 import { getAgentName } from "./agent-name.js";
+import { mapTool, resultMetadata, resultText } from "./tool-map.js";
 import { ocIdFor, piSessionDir, piSessionsRootMtime, scanAllPiSessions, scanPiSessions, SessionStore, type ScannedSession } from "./session-store.js";
 import type {
   OCAssistantMessage,
@@ -666,6 +667,34 @@ export class SessionManager {
         break;
       }
 
+      case "tool_execution_start": {
+        const callID = typeof ev.toolCallId === "string" ? ev.toolCallId : undefined;
+        const part = callID !== undefined ? s.toolByCallId.get(callID) : undefined;
+        if (part === undefined) break;
+        const mapped = mapTool(typeof ev.toolName === "string" ? ev.toolName : part.tool, ev.args);
+        part.tool = mapped.tool;
+        part.state = {
+          status: "running", input: mapped.input, title: mapped.title,
+          ...(mapped.metadata !== undefined ? { metadata: mapped.metadata } : {}),
+          time: { start: part.state.status !== "pending" ? part.state.time.start : Date.now() },
+        };
+        this.emitPart(s, part);
+        break;
+      }
+
+      case "tool_execution_update": {
+        const part = typeof ev.toolCallId === "string" ? s.toolByCallId.get(ev.toolCallId) : undefined;
+        if (part === undefined || part.state.status !== "running") break;
+        this.emitPart(s, part);
+        break;
+      }
+
+      case "tool_execution_end": {
+        const result = ev.result !== null && typeof ev.result === "object" ? ev.result : {};
+        this.applyToolResults(s, [{ ...result, toolCallId: ev.toolCallId, isError: ev.isError }]);
+        break;
+      }
+
       case "message_start": {
         const msg = ev.message as { role?: string; provider?: unknown; model?: unknown; responseModel?: unknown } | undefined;
         if (msg?.role !== "assistant") break; // user message already recorded at prompt()
@@ -840,12 +869,14 @@ export class SessionManager {
       const args = ame.toolCall?.arguments ?? {};
       const callID = ame.toolCall?.id ?? part.callID;
       const name = ame.toolCall?.name ?? part.tool;
+      const mapped = mapTool(name, args);
       part.callID = callID;
-      part.tool = name;
+      part.tool = mapped.tool;
       part.state = {
         status: "running",
-        input: args,
-        title: toolTitle(name, args),
+        input: mapped.input,
+        title: mapped.title,
+        ...(mapped.metadata !== undefined ? { metadata: mapped.metadata } : {}),
         time: { start: Date.now() },
       };
       s.toolByCallId.set(callID, part);
@@ -875,20 +906,23 @@ export class SessionManager {
       const text = resultText(tr.content);
       const startedAt = part.state.status !== "pending" ? part.state.time.start : Date.now();
       const input = part.state.input ?? {};
+      const metadata = { ...(part.state.status !== "pending" ? part.state.metadata : {}), ...resultMetadata(part.tool, tr) };
+      const title = part.state.status === "running" || part.state.status === "completed" ? part.state.title ?? part.tool : part.tool;
       if (tr.isError === true) {
         part.state = {
           status: "error",
           input,
-          error: text ?? `tool ${part.tool} failed`,
+          error: text || `tool ${part.tool} failed`,
+          metadata,
           time: { start: startedAt, end: Date.now() },
         };
       } else {
         part.state = {
           status: "completed",
           input,
-          output: text ?? "",
-          title: toolTitle(part.tool, input),
-          metadata: {},
+          output: text,
+          title,
+          metadata,
           time: { start: startedAt, end: Date.now() },
         };
       }
@@ -949,25 +983,6 @@ interface PiUsage {
   stopReason?: string;
 }
 
-/** Human title: `bash: <command>` / `write: <path>`, else the tool name. */
-function toolTitle(tool: string, args: Record<string, unknown>): string {
-  const cmd = typeof args.command === "string" ? args.command : undefined;
-  const path = typeof args.path === "string" ? args.path : undefined;
-  const hint = cmd ?? path;
-  if (hint === undefined) return tool;
-  const short = hint.length > 60 ? `${hint.slice(0, 57)}…` : hint;
-  return `${tool}: ${short}`;
-}
-
-/** pi toolResult content blocks → joined text. */
-function resultText(content: unknown): string | undefined {
-  if (!Array.isArray(content)) return undefined;
-  const text = content
-    .map((b) => (b && typeof b === "object" && typeof (b as { text?: unknown }).text === "string" ? (b as { text: string }).text : ""))
-    .join("");
-  return text === "" ? undefined : text;
-}
-
 // ----------------------------------------------------------------------
 // Restored-session history: pi JSONL file → OpenCode messages + parts
 // ----------------------------------------------------------------------
@@ -993,6 +1008,7 @@ interface PiFileMessage {
   toolCallId?: string;
   toolName?: string;
   isError?: boolean;
+  details?: unknown;
 }
 
 function entryTime(e: PiFileEntry): number {
@@ -1134,14 +1150,19 @@ function parsePiSessionFile(s: ManagedSession, agentName: string): OCMessageWith
           const tool = typeof block.name === "string" ? block.name : "unknown";
           const args = block.arguments;
           const input = args !== null && typeof args === "object" ? (args as Record<string, unknown>) : {};
+          const mapped = mapTool(tool, input);
           const part: OCToolPart = {
             id: partId,
             sessionID,
             messageID: msgId,
             type: "tool",
             callID,
-            tool,
-            state: { status: "running", input, title: toolTitle(tool, input), time: { start: created } },
+            tool: mapped.tool,
+            state: {
+              status: "running", input: mapped.input, title: mapped.title,
+              ...(mapped.metadata !== undefined ? { metadata: mapped.metadata } : {}),
+              time: { start: created },
+            },
           };
           toolParts.set(callID, part);
           parts.push(part);
@@ -1158,15 +1179,17 @@ function parsePiSessionFile(s: ManagedSession, agentName: string): OCMessageWith
       const text = resultText(m.content) ?? "";
       const startedAt = part.state.status !== "pending" ? part.state.time.start : created;
       const input = part.state.input ?? {};
+      const metadata = { ...(part.state.status !== "pending" ? part.state.metadata : {}), ...resultMetadata(part.tool, m) };
+      const title = part.state.status === "running" || part.state.status === "completed" ? part.state.title ?? part.tool : part.tool;
       part.state =
         m.isError === true
-          ? { status: "error", input, error: text !== "" ? text : `tool ${part.tool} failed`, time: { start: startedAt, end: created } }
+          ? { status: "error", input, error: text !== "" ? text : `tool ${part.tool} failed`, metadata, time: { start: startedAt, end: created } }
           : {
               status: "completed",
               input,
               output: text,
-              title: toolTitle(part.tool, input),
-              metadata: {},
+              title,
+              metadata,
               time: { start: startedAt, end: created },
             };
       continue;

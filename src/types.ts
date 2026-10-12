@@ -16,6 +16,7 @@ export interface OCSession {
   parentID?: string;
   title: string;
   version: string;
+  revert?: { messageID: string };
   time: {
     created: number;
     updated: number;
@@ -142,6 +143,7 @@ export type OCEvent =
   | { type: "session.idle"; properties: { sessionID: string } }
   | { type: "session.error"; properties: { sessionID?: string; error?: { name: string; data: { message: string } } } }
   | { type: "message.updated"; properties: { info: OCMessage } }
+  | { type: "message.removed"; properties: { sessionID: string; messageID: string } }
   | { type: "message.part.updated"; properties: { part: OCPart; delta?: string } }
   | {
       type: "permission.asked";

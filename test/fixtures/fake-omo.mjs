@@ -6,8 +6,8 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 
 const resumeIndex = process.argv.indexOf("--session");
-const sessionFile = resumeIndex === -1 ? join(process.cwd(), `${randomUUID()}.jsonl`) : process.argv[resumeIndex + 1];
-const header = existsSync(sessionFile) ? JSON.parse(readFileSync(sessionFile, "utf8").split("\n")[0]) :
+let sessionFile = resumeIndex === -1 ? join(process.cwd(), `${randomUUID()}.jsonl`) : process.argv[resumeIndex + 1];
+let header = existsSync(sessionFile) ? JSON.parse(readFileSync(sessionFile, "utf8").split("\n")[0]) :
   { type: "session", version: 3, id: randomUUID(), cwd: process.cwd(), timestamp: new Date().toISOString() };
 if (!existsSync(sessionFile)) writeFileSync(sessionFile, JSON.stringify(header) + "\n");
 const child = spawn("sleep", ["300"], { stdio: "ignore" });
@@ -15,7 +15,7 @@ const ignoring = process.argv.includes("--ignore-term");
 const requireGroup = process.argv.includes("--require-group");
 let stopping = false;
 let leaf = null;
-const records = readFileSync(sessionFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+let records = readFileSync(sessionFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
 for (const record of records) if (record.type === "message") leaf = record.id;
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\n");
 const stop = (eof = false) => {
@@ -43,11 +43,46 @@ const record = (role, text) => {
     message: { role, content: [{ type: "text", text }], provider: model.provider, model: model.id } };
   leaf = entry.id;
   appendFileSync(sessionFile, JSON.stringify(entry) + "\n");
+  records.push(entry);
   return entry.message;
+};
+const branch = (target = leaf) => {
+  const result = [];
+  for (let entry = records.find((r) => r.id === target); entry?.type !== "session" && entry; entry = records.find((r) => r.id === entry.parentId)) result.push(entry);
+  return result.reverse();
 };
 input.on("line", (line) => {
   const command = JSON.parse(line);
   let data = {};
+  if (command.type === "get_entries") data = { entries: records.filter((r) => r.type !== "session"), leafId: leaf };
+  if (command.type === "get_tree") {
+    const nodes = records.filter((r) => r.type !== "session").map((entry) => ({ entry, children: [] }));
+    for (const node of nodes) nodes.find((n) => n.entry.id === node.entry.parentId)?.children.push(node);
+    data = { tree: nodes.filter((n) => n.entry.parentId === null), leafId: leaf };
+  }
+  if (command.type === "navigate_tree") {
+    const entry = records.find((r) => r.id === command.targetId && r.type !== "session");
+    if (!entry) {
+      send({ type: "response", id: command.id, command: command.type, success: false, error: `Entry ${command.targetId} not found` });
+      return;
+    }
+    leaf = command.intent === "resume" || entry.message?.role !== "user" ? entry.id : entry.parentId;
+    data = { cancelled: false, leafId: leaf };
+  }
+  if (command.type === "fork") {
+    const entry = records.find((r) => r.id === command.entryId && r.type !== "session");
+    if (!entry || (command.position !== "at" && entry.message?.role !== "user")) {
+      send({ type: "response", id: command.id, command: command.type, success: false, error: "Invalid entry ID for forking" });
+      return;
+    }
+    leaf = command.position === "at" ? entry.id : entry.parentId;
+    const entries = branch();
+    header = { ...header, id: randomUUID(), parentSession: sessionFile };
+    sessionFile = join(process.cwd(), `${header.id}.jsonl`);
+    records = [header, ...entries];
+    writeFileSync(sessionFile, records.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    data = { cancelled: false };
+  }
   if (command.type === "get_state") data = { model, sessionId: header.id, sessionFile, isStreaming: false,
     pid: process.pid, childPid: child.pid, resumed: resumeIndex !== -1, history: readFileSync(sessionFile, "utf8") };
   if (command.type === "set_model") {
@@ -57,7 +92,7 @@ input.on("line", (line) => {
   if (command.type === "prompt") {
     record("user", command.message);
     send({ type: "agent_start" });
-    const message = record("assistant", `history:${records.filter((r) => r.type === "message").length};${command.message}`);
+    const message = record("assistant", `history:${branch().filter((r) => r.type === "message").length};${command.message}`);
     send({ type: "message_start", message });
     send({ type: "message_update", assistantMessageEvent: { type: "text_end", contentIndex: 0, content: message.content[0].text } });
     send({ type: "message_end", message });

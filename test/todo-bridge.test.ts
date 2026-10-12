@@ -21,7 +21,7 @@ function session(piPath: string): ManagedSession {
   return {
     info: { id: "ses_test", projectID: "/tmp/test", directory: "/tmp/test", title: "Todos", version: "test", time: { created: 0, updated: 0 } },
     pi: undefined, messages: [], status: { type: "idle" }, model: undefined, streaming: undefined,
-    toolByCallId: new Map(), piPath, hasPendingInteraction: () => false, hasRunningChildren: () => false,
+    toolByCallId: new Map(), tree: { messageEntries: {} }, piPath, hasPendingInteraction: () => false, hasRunningChildren: () => false,
   };
 }
 

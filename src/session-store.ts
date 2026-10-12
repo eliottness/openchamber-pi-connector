@@ -30,6 +30,7 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { piAgentDir } from "./agent-dir.js";
+import type { SessionTreeState } from "./session-tree.js";
 
 /** pi's session directory for a given cwd (see pi docs/session-format.md). */
 export function piSessionDir(cwd: string): string {
@@ -54,6 +55,7 @@ export interface ScannedSession {
 
 /** Adapter-owned metadata that pi's files do not carry. */
 export interface SessionRegistryEntry {
+  tree?: SessionTreeState;
   piSessionId: string;
   piPath: string;
   directory: string;

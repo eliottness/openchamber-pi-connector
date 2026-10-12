@@ -122,7 +122,7 @@ test("restored offset ids support fork and reverting the first root message", as
   t.after(() => restored.disposeAll());
   const first = restored.messages(id)?.find((m) => m.info.role === "user");
   assert.ok(first);
-  assert.ok(first.info.id.startsWith("msg_r"));
+  assert.ok(first.info.id.startsWith(`msg_${id}_r`));
   await restored.revert(id, first.info.id);
   assert.equal(restored.get(id)?.tree.leafId, null);
   await restored.unrevert(id);

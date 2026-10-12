@@ -1,3 +1,4 @@
+/// <reference types="node" />
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -6,6 +7,8 @@ import test from "node:test";
 import { mapTool, toolMappers } from "../src/tool-map.js";
 import { SessionManager, type ManagedSession } from "../src/sessions.js";
 import { SessionStore } from "../src/session-store.js";
+import { ocIdFor } from "../src/session-store.js";
+import { stripTaskSuffix } from "../src/subagents.js";
 import type { OCToolPart } from "../src/types.js";
 
 const fixtures = join(process.cwd(), "test/fixtures/omo-tools");
@@ -31,7 +34,8 @@ for (const file of readdirSync(fixtures).filter((name) => name.endsWith(".json")
       if (keys[mapped.tool] !== undefined) assert.deepEqual(Object.keys(mapped.input), keys[mapped.tool]);
       else assert.deepEqual(mapped.input, sample.arguments);
       const blocks = sample.content as Array<{ type: string; text?: string }>;
-      assert.equal(mapped.output, blocks.filter((block) => block.type === "text").map((block) => block.text ?? "").join(""));
+      const text = blocks.filter((block) => block.type === "text").map((block) => block.text ?? "").join("");
+      assert.equal(mapped.output, fixture.tool === "task" ? stripTaskSuffix(text) : text);
       if (fixture.tool === "edit") {
         assert.deepEqual(mapped.metadata?.filediff, { file: sample.arguments.path });
         assert.equal(mapped.metadata?.patch, sample.details.patch);
@@ -42,7 +46,7 @@ for (const file of readdirSync(fixtures).filter((name) => name.endsWith(".json")
       if (fixture.tool === "task") {
         assert.equal(mapped.input.description, sample.arguments.task_summary ?? sample.arguments.name ?? sample.arguments.description);
         assert.equal(mapped.input.subagent_type, sample.arguments.subagent_type ?? sample.arguments.category);
-        assert.equal(mapped.metadata, undefined);
+        assert.equal(mapped.metadata?.sessionID, sample.details.task_id ? ocIdFor(String(sample.details.task_id)) : undefined);
       }
     }
   });

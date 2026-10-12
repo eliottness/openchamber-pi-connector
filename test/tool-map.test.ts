@@ -17,6 +17,7 @@ const keys: Record<string, string[]> = {
   eval: ["language", "code", "description"],
   question: ["questions"],
   task: ["description", "prompt", "subagent_type"],
+  todowrite: ["todos"],
 };
 
 for (const file of readdirSync(fixtures).filter((name) => name.endsWith(".json") && name !== "todo-state.json")) {
@@ -67,10 +68,10 @@ test("bash and questions use native renderer contracts", () => {
   }).input, { questions: [{ question: "Proceed?", header: "Choice", options, multiple: true }] });
 });
 
-test("unknown tools and todo pass through with prioritized bounded titles", () => {
+test("unknown tools pass through and todo uses the bridge mapper", () => {
   const args = { summary: "s".repeat(70), description: "lower priority", other: 1 };
   assert.deepEqual(mapTool("unknown", args), { tool: "unknown", input: args, title: "s".repeat(60) });
-  assert.deepEqual(mapTool("todo", { op: "view" }), { tool: "todo", input: { op: "view" }, title: "todo" });
+  assert.deepEqual(mapTool("todo", { op: "view" }), { tool: "todowrite", input: { todos: [] }, title: "Todos" });
   assert.equal(mapTool("toString", {}).tool, "toString");
   assert.equal(mapTool("unknown", { url: "https://example.org" }).title, "https://example.org");
 });
@@ -103,7 +104,7 @@ function session(piPath: string): ManagedSession {
   return {
     info: { id: "ses_test", projectID: "/tmp/test", directory: "/tmp/test", title: "Tools", version: "test", time: { created: 0, updated: 0 } },
     pi: undefined, messages: [], status: { type: "idle" }, model: undefined, streaming: undefined,
-    toolByCallId: new Map(), piPath,
+    toolByCallId: new Map(), piPath, hasPendingInteraction: () => false, hasRunningChildren: () => false,
   };
 }
 
@@ -126,6 +127,12 @@ test(`real RPC ${executionEvents ? "execution" : "turn_end-only"} events and JSO
   for (const event of events) {
     if (!executionEvents && String(event.type).startsWith("tool_execution_")) continue;
     manager["onPiEvent"](live, event);
+    if (event.type === "entry_appended") {
+      const entry = event.entry as Record<string, unknown>;
+      if (entry.customType === "senpi.todo-state") {
+        entries.push({ ...entry, id: `e${entries.length}`, parentId: entries.at(-1)?.id ?? null, timestamp: 1000 });
+      }
+    }
     if (event.type !== "message_end") continue;
     const message = event.message as Record<string, unknown>;
     if (!["user", "assistant", "toolResult"].includes(String(message.role))) continue;

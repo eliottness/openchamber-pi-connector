@@ -281,6 +281,28 @@ export class AdapterServer {
         case "POST /abort":
           this.json(res, 200, await this.sessions.abort(sessionId!));
           return;
+        case "POST /fork":
+        case "POST /revert":
+        case "POST /unrevert": {
+          const body = await this.body(req);
+          const messageID = body !== null && typeof body === "object" && "messageID" in body ? body.messageID : undefined;
+          if ((sub === "/revert" && (typeof messageID !== "string" || messageID === "")) ||
+              (sub === "/fork" && messageID !== undefined && (typeof messageID !== "string" || messageID === ""))) {
+            this.json(res, 400, { name: "InvalidRequest", data: { message: "messageID must be a nonempty string" } });
+            return;
+          }
+          try {
+            const info = sub === "/fork"
+              ? await this.sessions.fork(sessionId!, typeof messageID === "string" ? messageID : undefined)
+              : sub === "/revert"
+                ? await this.sessions.revert(sessionId!, String(messageID))
+                : await this.sessions.unrevert(sessionId!);
+            this.json(res, 200, info);
+          } catch (error) {
+            this.json(res, 400, { name: "SessionTreeError", data: { message: error instanceof Error ? error.message : String(error) } });
+          }
+          return;
+        }
         default:
           this.json(res, 501, { name: "NotImplemented", data: { message: `${method} ${path} not implemented (M1)` } });
           return;

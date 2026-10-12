@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { PiRpcClient } from "./pi-rpc.js";
 import { SessionLifecycle, type LifecycleOptions } from "./lifecycle.js";
 import { getAgentName } from "./agent-name.js";
+import { bindMessageEntries, forkConversation, getEntries, navigate, recordTurn, revertConversation, revertNotice, SessionTreeError, unrevertConversation, type SessionTreeState } from "./session-tree.js";
 import { ocIdFor, piSessionDir, piSessionsRootMtime, scanAllPiSessions, scanPiSessions, SessionStore, type ScannedSession } from "./session-store.js";
 import type {
   OCAssistantMessage,
@@ -39,6 +40,7 @@ interface StreamingState {
 }
 
 export interface ManagedSession {
+  tree: SessionTreeState;
   info: OCSession;
   /** undefined while dormant (restored from disk, no pi process spawned yet). */
   pi: PiRpcClient | undefined;
@@ -89,6 +91,8 @@ function piModelId(responseModel: unknown, model: unknown): unknown {
 }
 
 export class SessionManager {
+  private disposed = false;
+  private operations = new Map<string, Promise<unknown>>();
   private sessions = new Map<string, ManagedSession>();
   private readonly store: SessionStore;
   readonly lifecycle: SessionLifecycle;
@@ -138,6 +142,7 @@ export class SessionManager {
     };
 
     const managed: ManagedSession = {
+      tree: { messageEntries: {} },
       info,
       pi,
       messages: [],
@@ -233,6 +238,7 @@ export class SessionManager {
   }
 
   get(sessionId: string): ManagedSession | undefined {
+    if (this.disposed) return undefined;
     const live = this.sessions.get(sessionId);
     if (live !== undefined) return live;
     return this.resolveRestored(sessionId);
@@ -286,7 +292,103 @@ export class SessionManager {
   messages(sessionId: string): OCMessageWithParts[] | undefined {
     const s = this.get(sessionId);
     if (!s) return undefined;
-    return this.ensureMessages(s);
+    const messages = this.ensureMessages(s);
+    const notice = revertNotice(s);
+    if (!notice) return messages;
+    const boundary = messages.findIndex((message) => message.info.id === s.tree.revert?.messageID);
+    return [...messages.slice(0, boundary), notice, ...messages.slice(boundary)];
+  }
+
+  private async operation<T>(s: ManagedSession, action: () => Promise<T>): Promise<T> {
+    const previous = this.operations.get(s.info.id);
+    const next = previous ? previous.then(() => this.lifecycle.use(s, action)) : this.lifecycle.use(s, action);
+    const settled = next.catch(() => undefined);
+    this.operations.set(s.info.id, settled);
+    try {
+      return await next;
+    } finally {
+      if (this.operations.get(s.info.id) === settled) this.operations.delete(s.info.id);
+    }
+  }
+
+  private async syncTree(s: ManagedSession) {
+    const pi = s.pi;
+    if (!pi) throw new SessionTreeError("Session has no OmO process");
+    this.ensureMessages(s);
+    const tree = await getEntries(pi);
+    bindMessageEntries(s, tree);
+    this.persistMeta(s);
+    return tree;
+  }
+
+  private async treeSession(sessionId: string, action: (s: ManagedSession, pi: PiRpcClient) => Promise<OCSession>): Promise<OCSession> {
+    const s = this.get(sessionId);
+    if (!s) throw new SessionTreeError(`unknown session: ${sessionId}`);
+    return this.operation(s, async () => {
+      if (s.status.type !== "idle" || s.hasPendingInteraction() || s.hasRunningChildren()) {
+        throw new SessionTreeError("Session is busy; stop the turn before changing the conversation");
+      }
+      if (!s.pi) await this.revive(s);
+      const pi = s.pi;
+      if (!pi) throw new SessionTreeError("Session cannot be resumed");
+      return action(s, pi);
+    });
+  }
+
+  async fork(sessionId: string, messageID?: string): Promise<OCSession> {
+    return this.treeSession(sessionId, async (s, pi) => {
+      const tree = await this.syncTree(s);
+      const state = await forkConversation(s, pi, tree, messageID);
+      const now = Date.now();
+      const child = this.adopt({
+        piSessionId: state.sessionId, piPath: state.sessionFile, directory: s.info.directory,
+        title: `${s.info.title} (fork)`, created: now, updated: now,
+      });
+      child.pi = pi;
+      child.piPath = state.sessionFile;
+      child.piSessionId = state.sessionId;
+      delete child.restored;
+      child.model = s.model;
+      child.tree.leafId = (await getEntries(pi)).leafId;
+      this.ensureMessages(child);
+      this.wirePi(child, pi);
+      this.lifecycle.touch(child);
+      this.persistMeta(child);
+      this.emit(child.info.directory, { type: "session.created", properties: { info: child.info } });
+      return child.info;
+    });
+  }
+
+  async revert(sessionId: string, messageID: string): Promise<OCSession> {
+    return this.treeSession(sessionId, async (s, pi) => {
+      const tree = await this.syncTree(s);
+      const previousNotice = revertNotice(s);
+      if (!await revertConversation(s, pi, tree, messageID)) return s.info;
+      this.removeRevertNotice(s, previousNotice);
+      this.persistMeta(s);
+      this.emit(s.info.directory, { type: "session.updated", properties: { info: s.info } });
+      const notice = revertNotice(s);
+      if (notice) {
+        this.emit(s.info.directory, { type: "message.updated", properties: { info: notice.info } });
+        for (const part of notice.parts) this.emitPart(s, part);
+      }
+      return s.info;
+    });
+  }
+
+  async unrevert(sessionId: string): Promise<OCSession> {
+    return this.treeSession(sessionId, async (s, pi) => {
+      const previousNotice = revertNotice(s);
+      if (!await unrevertConversation(s, pi)) return s.info;
+      this.removeRevertNotice(s, previousNotice);
+      this.persistMeta(s);
+      this.emit(s.info.directory, { type: "session.updated", properties: { info: s.info } });
+      return s.info;
+    });
+  }
+
+  private removeRevertNotice(s: ManagedSession, notice: OCMessageWithParts | undefined): void {
+    if (notice) this.emit(s.info.directory, { type: "message.removed", properties: { sessionID: s.info.id, messageID: notice.info.id } });
   }
 
   statuses(): Record<string, OCSessionStatus> {
@@ -369,7 +471,7 @@ export class SessionManager {
   async prompt(sessionId: string, text: string, model?: OCModelRef, noReply = false, messageID?: string): Promise<void> {
     const s = this.get(sessionId);
     if (!s) throw new Error(`unknown session: ${sessionId}`);
-    return this.lifecycle.use(s, () => this.promptLive(s, text, model, noReply, messageID));
+    return this.operation(s, () => this.promptLive(s, text, model, noReply, messageID));
   }
 
   private async promptLive(s: ManagedSession, text: string, model?: OCModelRef, noReply = false, messageID?: string): Promise<void> {
@@ -379,6 +481,20 @@ export class SessionManager {
     if (pi === undefined) throw new Error(`session cannot be resumed: ${sessionId}`);
     this.lifecycle.touch(s);
     this.ensureMessages(s);
+
+    if (s.tree.revert) {
+      const boundary = s.messages?.findIndex((message) => message.info.id === s.tree.revert?.messageID) ?? -1;
+      if (boundary >= 0) {
+        for (const message of s.messages?.splice(boundary) ?? []) {
+          this.emit(s.info.directory, { type: "message.removed", properties: { sessionID: s.info.id, messageID: message.info.id } });
+        }
+      }
+      this.removeRevertNotice(s, revertNotice(s));
+      delete s.tree.revert;
+      delete s.info.revert;
+      this.persistMeta(s);
+      this.emit(s.info.directory, { type: "session.updated", properties: { info: s.info } });
+    }
 
     // Same funnel as POST /api/session/{id}/model. Failing loudly matters: the
     // previous code swallowed pi's refusal and then reported the *requested*
@@ -456,10 +572,12 @@ export class SessionManager {
         this.persistMeta(s);
       }
     }
+    await this.syncTree(s);
   }
 
   async disposeAll(): Promise<void> {
     await this.lifecycle.stop();
+    this.disposed = true;
     this.sessions.clear();
   }
 
@@ -492,6 +610,7 @@ export class SessionManager {
     this.lifecycle.touch(s);
     s.piPath = restored.piPath;
     s.piSessionId = restored.piSessionId;
+    if (s.tree.leafId !== undefined) s.tree.leafId = await navigate(pi, s.tree.leafId);
     delete s.restored;
     // A restored session pushes pi's real model to the UI rather than leaving
     // the picker on whatever it last showed for this directory.
@@ -562,6 +681,7 @@ export class SessionManager {
       projectID: sc.directory,
       directory: sc.directory,
       title: reg?.title ?? sc.title,
+      ...(reg?.tree?.revert ? { revert: { messageID: reg.tree.revert.messageID } } : {}),
       version: ADAPTER_VERSION,
       time: {
         created: sc.created,
@@ -570,6 +690,7 @@ export class SessionManager {
       },
     };
     const managed: ManagedSession = {
+      tree: reg?.tree ?? { messageEntries: {} },
       info,
       pi: undefined,
       messages: undefined,
@@ -587,6 +708,13 @@ export class SessionManager {
 
   /** Resolve a bare session id (e.g. deep link after restart) via known directories. */
   private resolveRestored(sessionId: string): ManagedSession | undefined {
+    const reg = this.store.get(sessionId);
+    if (reg && existsSync(reg.piPath)) {
+      return this.adopt({
+        piSessionId: reg.piSessionId, piPath: reg.piPath, directory: reg.directory,
+        title: reg.title ?? "New session", created: reg.created, updated: reg.updated,
+      });
+    }
     const dirs = new Set<string>([
       ...this.store.directories(),
       ...[...this.sessions.values()].map((s) => s.info.directory),
@@ -606,6 +734,7 @@ export class SessionManager {
     const piSessionId = s.piSessionId ?? s.restored?.piSessionId;
     if (piPath === undefined || piSessionId === undefined) return;
     this.store.set(s.info.id, {
+      tree: s.tree,
       piSessionId,
       piPath,
       directory: s.info.directory,
@@ -656,6 +785,8 @@ export class SessionManager {
         this.setStatus(s, { type: "idle" });
         this.emit(dir, { type: "session.idle", properties: { sessionID: s.info.id } });
         if (s.piPath !== undefined) this.store.update(s.info.id, { updated: Date.now() });
+        recordTurn(s);
+        this.persistMeta(s);
         break;
       }
 
@@ -1051,6 +1182,8 @@ function parsePiSessionFile(s: ManagedSession, agentName: string): OCMessageWith
     if (e.type !== "message") continue;
     if (leaf === undefined || entryTime(e) >= entryTime(leaf)) leaf = e;
   }
+  const selectedLeaf = s.tree.revert ? s.tree.revert.previousLeafId : s.tree.leafId;
+  if (selectedLeaf !== undefined) leaf = selectedLeaf === null ? undefined : byId.get(selectedLeaf);
   const chain: PiFileEntry[] = [];
   const seen = new Set<PiFileEntry>();
   for (let cur = leaf; cur !== undefined && !seen.has(cur); ) {
@@ -1079,7 +1212,8 @@ function parsePiSessionFile(s: ManagedSession, agentName: string): OCMessageWith
     if (m.role === "user") {
       const text = textOf(m.content);
       if (text === "") continue;
-      const msgId = `msg_r${idx}`;
+      const msgId = Object.keys(s.tree.messageEntries).find((key) => s.tree.messageEntries[key] === e.id) ?? `msg_r${idx}`;
+      if (e.id) s.tree.messageEntries[msgId] = e.id;
       lastUserId = msgId;
       const info: OCUserMessage = {
         id: msgId,
@@ -1100,7 +1234,8 @@ function parsePiSessionFile(s: ManagedSession, agentName: string): OCMessageWith
       if (typeof m.provider === "string" && typeof m.model === "string") {
         currentModel = { providerID: m.provider, modelID: m.model };
       }
-      const msgId = `msg_r${idx}`;
+      const msgId = Object.keys(s.tree.messageEntries).find((key) => s.tree.messageEntries[key] === e.id) ?? `msg_r${idx}`;
+      if (e.id) s.tree.messageEntries[msgId] = e.id;
       const info: OCAssistantMessage = {
         id: msgId,
         sessionID,

@@ -10,6 +10,7 @@ import { PiRpcClient } from "./pi-rpc.js";
 import { SessionLifecycle, type LifecycleOptions } from "./lifecycle.js";
 import { getAgentName } from "./agent-name.js";
 import { mapTool, resultMetadata, resultText } from "./tool-map.js";
+import { SubagentBridge, taskParts, updateTaskParts, taskCompletions } from "./subagents.js";
 import { ocIdFor, piSessionDir, piSessionsRootMtime, scanAllPiSessions, scanPiSessions, SessionStore, type ScannedSession } from "./session-store.js";
 import type {
   OCAssistantMessage,
@@ -93,6 +94,7 @@ export class SessionManager {
   private sessions = new Map<string, ManagedSession>();
   private readonly store: SessionStore;
   readonly lifecycle: SessionLifecycle;
+  readonly subagents: SubagentBridge;
   /** directory → last scan freshness (pi dir mtime + wall clock). */
   private scanCache = new Map<string, { mtimeMs: number; at: number }>();
   /** freshness of the all-directories scan (see listAll). */
@@ -106,6 +108,8 @@ export class SessionManager {
   ) {
     this.store = store ?? new SessionStore();
     this.lifecycle = new SessionLifecycle(() => this.sessions.values(), lifecycleOptions);
+    this.subagents = new SubagentBridge(this.store, this.sessions, this.emit,
+      (session, raw) => parsePiSessionText(session, getAgentName(), raw));
   }
 
   async create(directory: string, title?: string, parentID?: string): Promise<OCSession> {
@@ -151,6 +155,7 @@ export class SessionManager {
       ...(piSessionId !== undefined ? { piSessionId } : {}),
     };
     this.sessions.set(info.id, managed);
+    this.subagents.wire(managed);
     this.lifecycle.touch(managed);
     this.wirePi(managed, pi);
 
@@ -185,6 +190,7 @@ export class SessionManager {
     });
     pi.onExit((code) => {
       if (s.pi !== pi) return;
+      this.subagents.stopParent(s.info.id);
       void this.lifecycle.dormant(s).catch((error: unknown) => console.error("[lifecycle] exit cleanup failed:", error));
       this.setStatus(s, { type: "idle" });
       this.emit(s.info.directory, {
@@ -215,6 +221,7 @@ export class SessionManager {
   }
 
   list(directory?: string): OCSession[] {
+    this.subagents.restoreAll();
     if (directory !== undefined) {
       this.ensureScanned(directory);
       return [...this.sessions.values()].map((s) => s.info).filter((s) => s.directory === directory);
@@ -230,13 +237,14 @@ export class SessionManager {
    */
   listAll(): OCSession[] {
     this.ensureAllScanned();
+    this.subagents.restoreAll();
     return [...this.sessions.values()].map((s) => s.info);
   }
 
   get(sessionId: string): ManagedSession | undefined {
     const live = this.sessions.get(sessionId);
     if (live !== undefined) return live;
-    return this.resolveRestored(sessionId);
+    return this.subagents.restore(sessionId) ?? this.resolveRestored(sessionId);
   }
 
   async remove(sessionId: string): Promise<boolean> {
@@ -246,10 +254,12 @@ export class SessionManager {
   private async removeLive(sessionId: string): Promise<boolean> {
     const s = this.get(sessionId);
     if (!s) return false;
+    this.subagents.stopParent(sessionId);
     this.sessions.delete(sessionId);
     this.emit(s.info.directory, { type: "session.deleted", properties: { info: s.info } });
     await this.lifecycle.dormant(s);
-    const piPath = s.piPath ?? s.restored?.piPath;
+    const piPath = this.subagents.owns(sessionId) ? undefined : s.piPath ?? s.restored?.piPath;
+    this.subagents.remove(sessionId);
     if (piPath !== undefined) {
       try {
         unlinkSync(piPath);
@@ -299,8 +309,12 @@ export class SessionManager {
   async abort(sessionId: string): Promise<boolean> {
     const s = this.get(sessionId);
     if (!s) return false;
-    if (s.pi === undefined) return true; // dormant sessions are idle by definition
+    if (s.pi === undefined) {
+      this.subagents.stopParent(sessionId);
+      return true;
+    }
     await s.pi.command({ type: "abort" }).catch(() => undefined);
+    this.subagents.stopParent(sessionId);
     return true;
   }
 
@@ -461,6 +475,7 @@ export class SessionManager {
 
   async disposeAll(): Promise<void> {
     await this.lifecycle.stop();
+    this.subagents.dispose();
     this.sessions.clear();
   }
 
@@ -503,7 +518,11 @@ export class SessionManager {
   }
 
   private ensureMessages(s: ManagedSession): OCMessageWithParts[] {
-    if (s.messages === undefined) s.messages = parsePiSessionFile(s, getAgentName());
+    if (this.subagents.owns(s.info.id)) return this.subagents.messages(s.info.id);
+    if (s.messages === undefined) {
+      s.messages = parsePiSessionFile(s, getAgentName());
+      this.subagents.discover(s, s.messages);
+    }
     return s.messages;
   }
 
@@ -583,6 +602,7 @@ export class SessionManager {
       hasRunningChildren: () => false,
     };
     this.sessions.set(ocId, managed);
+    this.subagents.wire(managed);
     return managed;
   }
 
@@ -639,6 +659,7 @@ export class SessionManager {
   }
 
   private onPiEvent(s: ManagedSession, ev: Record<string, unknown>): void {
+    this.subagents.wake(s, ev);
     const dir = s.info.directory;
     if (process.env.OCPI_DEBUG) {
       const ame = (ev.assistantMessageEvent as { type?: string } | undefined)?.type;
@@ -653,6 +674,7 @@ export class SessionManager {
       case "agent_end": {
         if (ev.willRetry === true) break; // auto-retry keeps the session busy
         this.finalizeDanglingTools(s);
+        this.subagents.finishCalls(s.info.id);
         this.finishStreaming(s);
         this.setStatus(s, { type: "idle" });
         this.emit(dir, { type: "session.idle", properties: { sessionID: s.info.id } });
@@ -668,6 +690,7 @@ export class SessionManager {
       }
 
       case "tool_execution_start": {
+        if (ev.toolName === "task") break; // Expanded when the argument stream closes.
         const callID = typeof ev.toolCallId === "string" ? ev.toolCallId : undefined;
         const part = callID !== undefined ? s.toolByCallId.get(callID) : undefined;
         if (part === undefined) break;
@@ -683,6 +706,8 @@ export class SessionManager {
       }
 
       case "tool_execution_update": {
+        if (typeof ev.toolCallId === "string" && this.subagents.result(s, ev.toolCallId,
+          ev.partialResult !== null && typeof ev.partialResult === "object" ? ev.partialResult : {}, false)) break;
         const part = typeof ev.toolCallId === "string" ? s.toolByCallId.get(ev.toolCallId) : undefined;
         if (part === undefined || part.state.status !== "running") break;
         this.emitPart(s, part);
@@ -851,6 +876,7 @@ export class SessionManager {
     }
 
     if (ame.type === "toolcall_start") {
+      if (part.tool === "task") return;
       this.emitPart(s, part);
       return;
     }
@@ -860,7 +886,7 @@ export class SessionManager {
       // OpenCode pending state is designed exactly for this).
       if (part.state.status === "pending" && typeof ame.delta === "string") {
         (part.state as OCToolStatePending).raw += ame.delta;
-        this.emitPart(s, part);
+        if (part.tool !== "task") this.emitPart(s, part);
       }
       return;
     }
@@ -869,6 +895,11 @@ export class SessionManager {
       const args = ame.toolCall?.arguments ?? {};
       const callID = ame.toolCall?.id ?? part.callID;
       const name = ame.toolCall?.name ?? part.tool;
+      if (name === "task") {
+        part.callID = callID;
+        this.subagents.start(s, part, args);
+        return;
+      }
       const mapped = mapTool(name, args);
       part.callID = callID;
       part.tool = mapped.tool;
@@ -900,6 +931,7 @@ export class SessionManager {
   private applyToolResults(s: ManagedSession, results: Array<Record<string, unknown>>): void {
     for (const tr of results) {
       const callID = typeof tr.toolCallId === "string" ? tr.toolCallId : undefined;
+      if (callID !== undefined && this.subagents.result(s, callID, tr, true)) continue;
       const part = callID !== undefined ? s.toolByCallId.get(callID) : undefined;
       if (!part || callID === undefined) continue;
       s.toolByCallId.delete(callID);
@@ -995,6 +1027,8 @@ interface PiFileEntry {
   provider?: string;
   modelId?: string;
   message?: PiFileMessage;
+  customType?: string;
+  details?: unknown;
 }
 
 interface PiFileMessage {
@@ -1038,20 +1072,25 @@ function textOf(content: Array<Record<string, unknown>> | undefined): string {
 function parsePiSessionFile(s: ManagedSession, agentName: string): OCMessageWithParts[] {
   const piPath = s.piPath ?? s.restored?.piPath;
   if (piPath === undefined) return [];
-  const sessionID = s.info.id;
-  const directory = s.info.directory;
   let raw: string;
   try {
     raw = readFileSync(piPath, "utf8");
   } catch {
     return [];
   }
+  return parsePiSessionText(s, agentName, raw);
+}
+
+function parsePiSessionText(s: ManagedSession, agentName: string, raw: string): OCMessageWithParts[] {
+  const sessionID = s.info.id;
+  const directory = s.info.directory;
 
   const entries: PiFileEntry[] = [];
   for (const line of raw.split("\n")) {
     if (line.length === 0) continue;
     try {
-      entries.push(JSON.parse(line) as PiFileEntry);
+      const value = JSON.parse(line) as PiFileEntry | null;
+      if (value !== null && typeof value === "object") entries.push(value);
     } catch {
       /* torn trailing write — ignore */
     }
@@ -1077,7 +1116,7 @@ function parsePiSessionFile(s: ManagedSession, agentName: string): OCMessageWith
   chain.reverse();
 
   const out: OCMessageWithParts[] = [];
-  const toolParts = new Map<string, OCToolPart>();
+  const toolParts = new Map<string, OCToolPart[]>();
   let currentModel: OCModelRef = { providerID: "unknown", modelID: "unknown" };
   let lastUserId = "";
 
@@ -1095,7 +1134,7 @@ function parsePiSessionFile(s: ManagedSession, agentName: string): OCMessageWith
     if (m.role === "user") {
       const text = textOf(m.content);
       if (text === "") continue;
-      const msgId = `msg_r${idx}`;
+      const msgId = `msg_${sessionID}_r${idx}`;
       lastUserId = msgId;
       const info: OCUserMessage = {
         id: msgId,
@@ -1106,7 +1145,7 @@ function parsePiSessionFile(s: ManagedSession, agentName: string): OCMessageWith
         model: currentModel,
       };
       const parts: OCPart[] = [
-        { id: `prt_r${idx}_0`, sessionID, messageID: msgId, type: "text", text, time: { start: created, end: created } },
+        { id: `prt_${sessionID}_r${idx}_0`, sessionID, messageID: msgId, type: "text", text, time: { start: created, end: created } },
       ];
       out.push({ info, parts });
       continue;
@@ -1116,7 +1155,7 @@ function parsePiSessionFile(s: ManagedSession, agentName: string): OCMessageWith
       if (typeof m.provider === "string" && typeof m.model === "string") {
         currentModel = { providerID: m.provider, modelID: m.model };
       }
-      const msgId = `msg_r${idx}`;
+      const msgId = `msg_${sessionID}_r${idx}`;
       const info: OCAssistantMessage = {
         id: msgId,
         sessionID,
@@ -1139,7 +1178,7 @@ function parsePiSessionFile(s: ManagedSession, agentName: string): OCMessageWith
       const parts: OCPart[] = [];
       const blocks = Array.isArray(m.content) ? m.content : [];
       blocks.forEach((block, b) => {
-        const partId = `prt_r${idx}_${b}`;
+        const partId = `prt_${sessionID}_r${idx}_${b}`;
         const kind = block?.type;
         if (kind === "text" && typeof block.text === "string") {
           parts.push({ id: partId, sessionID, messageID: msgId, type: "text", text: block.text, time: { start: created, end: created } });
@@ -1164,8 +1203,9 @@ function parsePiSessionFile(s: ManagedSession, agentName: string): OCMessageWith
               time: { start: created },
             },
           };
-          toolParts.set(callID, part);
-          parts.push(part);
+          const mappedParts = tool === "task" ? taskParts(part, input) : [part];
+          toolParts.set(callID, mappedParts);
+          parts.push(...mappedParts);
         }
       });
       out.push({ info, parts });
@@ -1174,8 +1214,13 @@ function parsePiSessionFile(s: ManagedSession, agentName: string): OCMessageWith
 
     if (m.role === "toolResult") {
       const callID = typeof m.toolCallId === "string" ? m.toolCallId : undefined;
-      const part = callID !== undefined ? toolParts.get(callID) : undefined;
+      const matching = callID !== undefined ? toolParts.get(callID) : undefined;
+      const part = matching?.[0];
       if (part === undefined) continue; // result without a visible call (abandoned branch)
+      if (part.tool === "task" && matching !== undefined) {
+        updateTaskParts(matching, m, true, created);
+        continue;
+      }
       const text = resultText(m.content) ?? "";
       const startedAt = part.state.status !== "pending" ? part.state.time.start : created;
       const input = part.state.input ?? {};
@@ -1195,6 +1240,19 @@ function parsePiSessionFile(s: ManagedSession, agentName: string): OCMessageWith
       continue;
     }
     // system / custom entries are not rendered
+  }
+  // Completions can be appended after the newest message, outside its ancestor chain.
+  for (const entry of entries) {
+    if (entry.customType !== "omo-senpi:wake") continue;
+    for (const data of taskCompletions(entry.details)) {
+      for (const parts of toolParts.values()) {
+        for (const part of parts) {
+          if (part.tool === "task" && part.state.status !== "pending" && part.state.metadata?.taskID === data.task_id) {
+            updateTaskParts([part], { details: data }, true, entryTime(entry));
+          }
+        }
+      }
+    }
   }
   return out;
 }

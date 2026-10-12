@@ -95,7 +95,7 @@ export function mapTool(omoName: string, args: unknown, result?: ToolResult): Ma
   if (result === undefined) return mapped;
   const metadata = { ...mapped.metadata, ...resultMetadata(result) };
   return {
-    ...mapped, output: resultText(result.content),
+    ...mapped, output: mapped.output ?? resultText(result.content),
     ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
   };
 }

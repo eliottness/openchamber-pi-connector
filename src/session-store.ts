@@ -30,6 +30,7 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { piAgentDir } from "./agent-dir.js";
+import type { ChildTask } from "./subagents.js";
 
 /** pi's session directory for a given cwd (see pi docs/session-format.md). */
 export function piSessionDir(cwd: string): string {
@@ -54,6 +55,8 @@ export interface ScannedSession {
 
 /** Adapter-owned metadata that pi's files do not carry. */
 export interface SessionRegistryEntry {
+  parentID?: string | undefined;
+  task?: ChildTask;
   piSessionId: string;
   piPath: string;
   directory: string;
@@ -256,11 +259,13 @@ export function scanPiSessions(directory: string): ScannedSession[] {
  * paths). Atomic writes, lazy load, corrupt file degrades to an empty map.
  */
 export class SessionStore {
+  readonly stateDir: string;
   private readonly file: string;
   private entries: Map<string, SessionRegistryEntry> | undefined;
 
   constructor(stateDir?: string) {
     const dir = stateDir ?? process.env.OCPI_STATE_DIR ?? join(homedir(), ".config", "openchamber-pi-connector");
+    this.stateDir = dir;
     this.file = join(dir, "sessions.json");
   }
 
@@ -299,6 +304,10 @@ export class SessionStore {
 
   get(ocSessionId: string): SessionRegistryEntry | undefined {
     return this.load().get(ocSessionId);
+  }
+
+  childIds(): string[] {
+    return [...this.load()].filter(([, entry]) => entry.task !== undefined && entry.parentID !== undefined).map(([id]) => id);
   }
 
   set(ocSessionId: string, entry: SessionRegistryEntry): void {

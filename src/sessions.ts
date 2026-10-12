@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { PiRpcClient } from "./pi-rpc.js";
+import { SessionLifecycle, type LifecycleOptions } from "./lifecycle.js";
 import { getAgentName } from "./agent-name.js";
 import { ocIdFor, piSessionDir, piSessionsRootMtime, scanAllPiSessions, scanPiSessions, SessionStore, type ScannedSession } from "./session-store.js";
 import type {
@@ -58,6 +59,9 @@ export interface ManagedSession {
   piPath?: string;
   /** Set while dormant: revive() spawns pi with `--session <piPath>`. */
   restored?: { piSessionId: string; piPath: string };
+  /** Hooks wired by the approvals and child-task bridges. */
+  hasPendingInteraction: () => boolean;
+  hasRunningChildren: () => boolean;
 }
 
 type EventSink = (directory: string, event: OCEvent) => void;
@@ -87,6 +91,7 @@ function piModelId(responseModel: unknown, model: unknown): unknown {
 export class SessionManager {
   private sessions = new Map<string, ManagedSession>();
   private readonly store: SessionStore;
+  readonly lifecycle: SessionLifecycle;
   /** directory → last scan freshness (pi dir mtime + wall clock). */
   private scanCache = new Map<string, { mtimeMs: number; at: number }>();
   /** freshness of the all-directories scan (see listAll). */
@@ -96,13 +101,23 @@ export class SessionManager {
     private emit: EventSink,
     store?: SessionStore,
     private defaultDirectory?: string,
+    lifecycleOptions: LifecycleOptions = {},
   ) {
     this.store = store ?? new SessionStore();
+    this.lifecycle = new SessionLifecycle(() => this.sessions.values(), lifecycleOptions);
   }
 
   async create(directory: string, title?: string, parentID?: string): Promise<OCSession> {
-    const pi = new PiRpcClient({ cwd: directory });
-    const state = await pi.command<PiState>({ type: "get_state" });
+    return this.lifecycle.run(() => this.createLive(directory, title, parentID));
+  }
+
+  private async createLive(directory: string, title?: string, parentID?: string): Promise<OCSession> {
+    await this.lifecycle.makeRoom();
+    const pi = new PiRpcClient({ cwd: directory, clock: this.lifecycle.clock });
+    const state = await pi.command<PiState>({ type: "get_state" }).catch(async (error: unknown) => {
+      await pi.dispose();
+      throw error;
+    });
     if (!state.success || !state.data) {
       await pi.dispose();
       throw new Error(`pi get_state failed: ${state.error ?? "no data"}`);
@@ -130,9 +145,12 @@ export class SessionManager {
       model: undefined,
       streaming: undefined,
       toolByCallId: new Map(),
+      hasPendingInteraction: () => false,
+      hasRunningChildren: () => false,
       ...(piSessionId !== undefined ? { piSessionId } : {}),
     };
     this.sessions.set(info.id, managed);
+    this.lifecycle.touch(managed);
     this.wirePi(managed, pi);
 
     this.emit(directory, { type: "session.created", properties: { info } });
@@ -159,8 +177,14 @@ export class SessionManager {
   }
 
   private wirePi(s: ManagedSession, pi: PiRpcClient): void {
-    pi.onEvent((payload) => this.onPiEvent(s, payload));
+    pi.onEvent((payload) => {
+      if (s.pi !== pi) return;
+      this.lifecycle.touch(s);
+      this.onPiEvent(s, payload);
+    });
     pi.onExit((code) => {
+      if (s.pi !== pi) return;
+      void this.lifecycle.dormant(s).catch((error: unknown) => console.error("[lifecycle] exit cleanup failed:", error));
       this.setStatus(s, { type: "idle" });
       this.emit(s.info.directory, {
         type: "session.error",
@@ -215,11 +239,15 @@ export class SessionManager {
   }
 
   async remove(sessionId: string): Promise<boolean> {
+    return this.lifecycle.run(() => this.removeLive(sessionId));
+  }
+
+  private async removeLive(sessionId: string): Promise<boolean> {
     const s = this.get(sessionId);
     if (!s) return false;
     this.sessions.delete(sessionId);
     this.emit(s.info.directory, { type: "session.deleted", properties: { info: s.info } });
-    if (s.pi !== undefined) await s.pi.dispose();
+    await this.lifecycle.dormant(s);
     const piPath = s.piPath ?? s.restored?.piPath;
     if (piPath !== undefined) {
       try {
@@ -284,6 +312,11 @@ export class SessionManager {
   async setModel(sessionId: string, ref: OCModelRef): Promise<OCModelRef> {
     const s = this.get(sessionId);
     if (s === undefined) throw new Error(`unknown session: ${sessionId}`);
+    return this.lifecycle.use(s, () => this.setModelLive(s, ref));
+  }
+
+  private async setModelLive(s: ManagedSession, ref: OCModelRef): Promise<OCModelRef> {
+    const sessionId = s.info.id;
     if (s.pi === undefined) await this.revive(s);
     const pi = s.pi;
     if (pi === undefined) throw new Error(`session cannot be resumed: ${sessionId}`);
@@ -336,9 +369,15 @@ export class SessionManager {
   async prompt(sessionId: string, text: string, model?: OCModelRef, noReply = false, messageID?: string): Promise<void> {
     const s = this.get(sessionId);
     if (!s) throw new Error(`unknown session: ${sessionId}`);
+    return this.lifecycle.use(s, () => this.promptLive(s, text, model, noReply, messageID));
+  }
+
+  private async promptLive(s: ManagedSession, text: string, model?: OCModelRef, noReply = false, messageID?: string): Promise<void> {
+    const sessionId = s.info.id;
     if (s.pi === undefined) await this.revive(s);
     const pi = s.pi;
     if (pi === undefined) throw new Error(`session cannot be resumed: ${sessionId}`);
+    this.lifecycle.touch(s);
     this.ensureMessages(s);
 
     // Same funnel as POST /api/session/{id}/model. Failing loudly matters: the
@@ -391,8 +430,13 @@ export class SessionManager {
     s.toolByCallId = new Map(); // results for this run arrive by toolCallId
 
     // pi streams asynchronously after accepting the prompt.
-    const res = await pi.command({ type: "prompt", message: text });
+    this.setStatus(s, { type: "busy" });
+    const res = await pi.command({ type: "prompt", message: text }).catch((error: unknown) => {
+      this.setStatus(s, { type: "idle" });
+      throw error;
+    });
     if (!res.success) {
+      this.setStatus(s, { type: "idle" });
       this.emit(s.info.directory, {
         type: "session.error",
         properties: {
@@ -415,9 +459,7 @@ export class SessionManager {
   }
 
   async disposeAll(): Promise<void> {
-    await Promise.all(
-      [...this.sessions.values()].map((s) => (s.pi !== undefined ? s.pi.dispose() : Promise.resolve())),
-    );
+    await this.lifecycle.stop();
     this.sessions.clear();
   }
 
@@ -427,16 +469,27 @@ export class SessionManager {
 
   /** Spawn pi against the session's JSONL file and adopt it as live. */
   private async revive(s: ManagedSession): Promise<void> {
+    return this.lifecycle.run(() => this.reviveLive(s));
+  }
+
+  private async reviveLive(s: ManagedSession): Promise<void> {
+    if (this.sessions.get(s.info.id) !== s) throw new Error(`session was deleted: ${s.info.id}`);
+    if (s.pi !== undefined) return; // Concurrent prompts share one revival.
     const restored = s.restored;
     if (restored === undefined) throw new Error(`session is not restorable: ${s.info.id}`);
     if (!existsSync(restored.piPath)) throw new Error(`pi session file is gone: ${restored.piPath}`);
-    const pi = new PiRpcClient({ cwd: s.info.directory, args: ["--session", restored.piPath] });
-    const state = await pi.command<PiState>({ type: "get_state" });
+    await this.lifecycle.makeRoom();
+    const pi = new PiRpcClient({ cwd: s.info.directory, args: ["--session", restored.piPath], clock: this.lifecycle.clock });
+    const state = await pi.command<PiState>({ type: "get_state" }).catch(async (error: unknown) => {
+      await pi.dispose();
+      throw error;
+    });
     if (!state.success || !state.data) {
       await pi.dispose();
       throw new Error(`pi get_state failed on resume: ${state.error ?? "no data"}`);
     }
     s.pi = pi;
+    this.lifecycle.touch(s);
     s.piPath = restored.piPath;
     s.piSessionId = restored.piSessionId;
     delete s.restored;
@@ -525,6 +578,8 @@ export class SessionManager {
       streaming: undefined,
       toolByCallId: new Map(),
       restored: { piSessionId: sc.piSessionId, piPath: sc.piPath },
+      hasPendingInteraction: () => false,
+      hasRunningChildren: () => false,
     };
     this.sessions.set(ocId, managed);
     return managed;

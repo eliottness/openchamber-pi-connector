@@ -8,7 +8,12 @@ import { appendFileSync, existsSync, readFileSync, readdirSync, statSync, unlink
 import { join } from "node:path";
 import { PiRpcClient } from "./pi-rpc.js";
 import { SessionLifecycle, type LifecycleOptions } from "./lifecycle.js";
+import { ApprovalBridge, extensionUiRequestFrom, type PendingPermission, type PendingQuestion } from "./approvals.js";
 import { getAgentName } from "./agent-name.js";
+import { mapTool, resultMetadata, resultText } from "./tool-map.js";
+import { TodoBridge, type Todo, type TodoUpdated } from "./todo-bridge.js";
+import { bindMessageEntries, forkConversation, getEntries, navigate, recordTurn, revertConversation, revertNotice, SessionTreeError, unrevertConversation, type SessionTreeState } from "./session-tree.js";
+import { SubagentBridge, taskParts, updateTaskParts, taskCompletions } from "./subagents.js";
 import { ocIdFor, piSessionDir, piSessionsRootMtime, scanAllPiSessions, scanPiSessions, SessionStore, type ScannedSession } from "./session-store.js";
 import type {
   OCAssistantMessage,
@@ -39,6 +44,7 @@ interface StreamingState {
 }
 
 export interface ManagedSession {
+  tree: SessionTreeState;
   info: OCSession;
   /** undefined while dormant (restored from disk, no pi process spawned yet). */
   pi: PiRpcClient | undefined;
@@ -54,6 +60,8 @@ export interface ManagedSession {
    * *result* later, in turn_end.toolResults — matched by toolCallId.
    */
   toolByCallId: Map<string, OCToolPart>;
+  approvals?: ApprovalBridge;
+  todoBridge?: TodoBridge;
   /** pi's own session id + file — the bridge to persistence/restore. */
   piSessionId?: string;
   piPath?: string;
@@ -64,7 +72,7 @@ export interface ManagedSession {
   hasRunningChildren: () => boolean;
 }
 
-type EventSink = (directory: string, event: OCEvent) => void;
+type EventSink = (directory: string, event: OCEvent | TodoUpdated) => void;
 
 interface PiModel {
   id: string;
@@ -89,9 +97,12 @@ function piModelId(responseModel: unknown, model: unknown): unknown {
 }
 
 export class SessionManager {
+  private disposed = false;
+  private operations = new Map<string, Promise<unknown>>();
   private sessions = new Map<string, ManagedSession>();
   private readonly store: SessionStore;
   readonly lifecycle: SessionLifecycle;
+  readonly subagents: SubagentBridge;
   /** directory → last scan freshness (pi dir mtime + wall clock). */
   private scanCache = new Map<string, { mtimeMs: number; at: number }>();
   /** freshness of the all-directories scan (see listAll). */
@@ -105,6 +116,8 @@ export class SessionManager {
   ) {
     this.store = store ?? new SessionStore();
     this.lifecycle = new SessionLifecycle(() => this.sessions.values(), lifecycleOptions);
+    this.subagents = new SubagentBridge(this.store, this.sessions, this.emit,
+      (session, raw) => parsePiSessionText(session, getAgentName(), raw));
   }
 
   async create(directory: string, title?: string, parentID?: string): Promise<OCSession> {
@@ -138,6 +151,7 @@ export class SessionManager {
     };
 
     const managed: ManagedSession = {
+      tree: { messageEntries: {} },
       info,
       pi,
       messages: [],
@@ -149,7 +163,9 @@ export class SessionManager {
       hasRunningChildren: () => false,
       ...(piSessionId !== undefined ? { piSessionId } : {}),
     };
+    managed.approvals = this.approvalsFor(managed);
     this.sessions.set(info.id, managed);
+    this.subagents.wire(managed);
     this.lifecycle.touch(managed);
     this.wirePi(managed, pi);
 
@@ -182,8 +198,16 @@ export class SessionManager {
       this.lifecycle.touch(s);
       this.onPiEvent(s, payload);
     });
+    pi.onExtensionUI((request) => {
+      if (s.pi !== pi) return;
+      this.lifecycle.touch(s);
+      const extensionRequest = extensionUiRequestFrom(request);
+      if (extensionRequest !== undefined) s.approvals?.handle(extensionRequest);
+    });
     pi.onExit((code) => {
       if (s.pi !== pi) return;
+      s.approvals?.finishTurn();
+      this.subagents.stopParent(s.info.id);
       void this.lifecycle.dormant(s).catch((error: unknown) => console.error("[lifecycle] exit cleanup failed:", error));
       this.setStatus(s, { type: "idle" });
       this.emit(s.info.directory, {
@@ -214,6 +238,7 @@ export class SessionManager {
   }
 
   list(directory?: string): OCSession[] {
+    this.subagents.restoreAll();
     if (directory !== undefined) {
       this.ensureScanned(directory);
       return [...this.sessions.values()].map((s) => s.info).filter((s) => s.directory === directory);
@@ -229,13 +254,15 @@ export class SessionManager {
    */
   listAll(): OCSession[] {
     this.ensureAllScanned();
+    this.subagents.restoreAll();
     return [...this.sessions.values()].map((s) => s.info);
   }
 
   get(sessionId: string): ManagedSession | undefined {
+    if (this.disposed) return undefined;
     const live = this.sessions.get(sessionId);
     if (live !== undefined) return live;
-    return this.resolveRestored(sessionId);
+    return this.subagents.restore(sessionId) ?? this.resolveRestored(sessionId);
   }
 
   async remove(sessionId: string): Promise<boolean> {
@@ -245,10 +272,13 @@ export class SessionManager {
   private async removeLive(sessionId: string): Promise<boolean> {
     const s = this.get(sessionId);
     if (!s) return false;
+    s.approvals?.cancelAll();
+    this.subagents.stopParent(sessionId);
     this.sessions.delete(sessionId);
     this.emit(s.info.directory, { type: "session.deleted", properties: { info: s.info } });
     await this.lifecycle.dormant(s);
-    const piPath = s.piPath ?? s.restored?.piPath;
+    const piPath = this.subagents.owns(sessionId) ? undefined : s.piPath ?? s.restored?.piPath;
+    this.subagents.remove(sessionId);
     if (piPath !== undefined) {
       try {
         unlinkSync(piPath);
@@ -286,7 +316,107 @@ export class SessionManager {
   messages(sessionId: string): OCMessageWithParts[] | undefined {
     const s = this.get(sessionId);
     if (!s) return undefined;
-    return this.ensureMessages(s);
+    const messages = this.ensureMessages(s);
+    // OpenChamber also hydrates the panel through SSE when reopening history.
+    if (s.todoBridge !== undefined) {
+      this.emit(s.info.directory, { type: "todo.updated", properties: { sessionID: s.info.id, todos: s.todoBridge.todos } });
+    }
+    const notice = revertNotice(s);
+    if (!notice) return messages;
+    const boundary = messages.findIndex((message) => message.info.id === s.tree.revert?.messageID);
+    return [...messages.slice(0, boundary), notice, ...messages.slice(boundary)];
+  }
+
+  private async operation<T>(s: ManagedSession, action: () => Promise<T>): Promise<T> {
+    const previous = this.operations.get(s.info.id);
+    const next = previous ? previous.then(() => this.lifecycle.use(s, action)) : this.lifecycle.use(s, action);
+    const settled = next.catch(() => undefined);
+    this.operations.set(s.info.id, settled);
+    try {
+      return await next;
+    } finally {
+      if (this.operations.get(s.info.id) === settled) this.operations.delete(s.info.id);
+    }
+  }
+
+  private async syncTree(s: ManagedSession) {
+    const pi = s.pi;
+    if (!pi) throw new SessionTreeError("Session has no OmO process");
+    this.ensureMessages(s);
+    const tree = await getEntries(pi);
+    bindMessageEntries(s, tree);
+    this.persistMeta(s);
+    return tree;
+  }
+
+  private async treeSession(sessionId: string, action: (s: ManagedSession, pi: PiRpcClient) => Promise<OCSession>): Promise<OCSession> {
+    const s = this.get(sessionId);
+    if (!s) throw new SessionTreeError(`unknown session: ${sessionId}`);
+    return this.operation(s, async () => {
+      if (s.status.type !== "idle" || s.hasPendingInteraction() || s.hasRunningChildren()) {
+        throw new SessionTreeError("Session is busy; stop the turn before changing the conversation");
+      }
+      if (!s.pi) await this.revive(s);
+      const pi = s.pi;
+      if (!pi) throw new SessionTreeError("Session cannot be resumed");
+      return action(s, pi);
+    });
+  }
+
+  async fork(sessionId: string, messageID?: string): Promise<OCSession> {
+    return this.treeSession(sessionId, async (s, pi) => {
+      const tree = await this.syncTree(s);
+      const state = await forkConversation(s, pi, tree, messageID);
+      const now = Date.now();
+      const child = this.adopt({
+        piSessionId: state.sessionId, piPath: state.sessionFile, directory: s.info.directory,
+        title: `${s.info.title} (fork)`, created: now, updated: now,
+      });
+      child.pi = pi;
+      child.piPath = state.sessionFile;
+      child.piSessionId = state.sessionId;
+      delete child.restored;
+      child.model = s.model;
+      child.tree.leafId = (await getEntries(pi)).leafId;
+      this.ensureMessages(child);
+      this.wirePi(child, pi);
+      this.lifecycle.touch(child);
+      this.persistMeta(child);
+      this.emit(child.info.directory, { type: "session.created", properties: { info: child.info } });
+      return child.info;
+    });
+  }
+
+  async revert(sessionId: string, messageID: string): Promise<OCSession> {
+    return this.treeSession(sessionId, async (s, pi) => {
+      const tree = await this.syncTree(s);
+      const previousNotice = revertNotice(s);
+      if (!await revertConversation(s, pi, tree, messageID)) return s.info;
+      this.removeRevertNotice(s, previousNotice);
+      this.persistMeta(s);
+      this.emit(s.info.directory, { type: "session.updated", properties: { info: s.info } });
+      const notice = revertNotice(s);
+      if (notice) {
+        this.emit(s.info.directory, { type: "message.updated", properties: { info: notice.info } });
+        for (const part of notice.parts) this.emitPart(s, part);
+      }
+      return s.info;
+    });
+  }
+
+  async unrevert(sessionId: string): Promise<OCSession> {
+    return this.treeSession(sessionId, async (s, pi) => {
+      const previousNotice = revertNotice(s);
+      if (!await unrevertConversation(s, pi)) return s.info;
+      this.removeRevertNotice(s, previousNotice);
+      this.persistMeta(s);
+      this.emit(s.info.directory, { type: "session.updated", properties: { info: s.info } });
+      return s.info;
+    });
+  }
+
+  private removeRevertNotice(s: ManagedSession, notice: OCMessageWithParts | undefined): void {
+    if (notice) this.emit(s.info.directory, { type: "message.removed", properties: { sessionID: s.info.id, messageID: notice.info.id } });
   }
 
   statuses(): Record<string, OCSessionStatus> {
@@ -295,12 +425,54 @@ export class SessionManager {
     return out;
   }
 
+  todos(sessionId: string): Todo[] | undefined {
+    const s = this.get(sessionId);
+    if (!s) return undefined;
+    this.ensureMessages(s);
+    return s.todoBridge?.todos ?? [];
+  }
+
   async abort(sessionId: string): Promise<boolean> {
     const s = this.get(sessionId);
     if (!s) return false;
-    if (s.pi === undefined) return true; // dormant sessions are idle by definition
+    if (s.pi === undefined) {
+      this.subagents.stopParent(sessionId);
+      return true; // dormant sessions are idle by definition
+    }
+    s.approvals?.cancelAll();
     await s.pi.command({ type: "abort" }).catch(() => undefined);
+    this.subagents.stopParent(sessionId);
     return true;
+  }
+
+  permissions(sessionId?: string): PendingPermission[] {
+    return [...this.sessions.values()].flatMap((session) => (sessionId === undefined || session.info.id === sessionId ? session.approvals?.permissions() ?? [] : []));
+  }
+
+  questions(sessionId?: string): PendingQuestion[] {
+    return [...this.sessions.values()].flatMap((session) => (sessionId === undefined || session.info.id === sessionId ? session.approvals?.questions() ?? [] : []));
+  }
+
+  replyPermission(sessionID: string, requestID: string, reply: "once" | "always" | "reject", message?: string): boolean {
+    return this.get(sessionID)?.approvals?.replyPermission(requestID, reply, message) ?? false;
+  }
+
+  replyQuestion(sessionID: string, requestID: string, answers: Array<string[]>): boolean {
+    return this.get(sessionID)?.approvals?.replyQuestion(requestID, answers) ?? false;
+  }
+
+  rejectQuestion(sessionID: string, requestID: string): boolean {
+    return this.get(sessionID)?.approvals?.rejectQuestion(requestID) ?? false;
+  }
+
+  private approvalsFor(s: ManagedSession): ApprovalBridge {
+    s.hasPendingInteraction = () => s.approvals?.hasPending(s.info.id) ?? false;
+    return new ApprovalBridge(
+      s.info.id,
+      (event) => this.emit(s.info.directory, event as OCEvent),
+      (response) => s.pi?.respondExtensionUI(response),
+      () => s.streaming?.message.id ?? [...(s.messages ?? [])].reverse().find((m) => m.info.role === "assistant")?.info.id,
+    );
   }
 
   /**
@@ -369,7 +541,7 @@ export class SessionManager {
   async prompt(sessionId: string, text: string, model?: OCModelRef, noReply = false, messageID?: string): Promise<void> {
     const s = this.get(sessionId);
     if (!s) throw new Error(`unknown session: ${sessionId}`);
-    return this.lifecycle.use(s, () => this.promptLive(s, text, model, noReply, messageID));
+    return this.operation(s, () => this.promptLive(s, text, model, noReply, messageID));
   }
 
   private async promptLive(s: ManagedSession, text: string, model?: OCModelRef, noReply = false, messageID?: string): Promise<void> {
@@ -379,6 +551,20 @@ export class SessionManager {
     if (pi === undefined) throw new Error(`session cannot be resumed: ${sessionId}`);
     this.lifecycle.touch(s);
     this.ensureMessages(s);
+
+    if (s.tree.revert) {
+      const boundary = s.messages?.findIndex((message) => message.info.id === s.tree.revert?.messageID) ?? -1;
+      if (boundary >= 0) {
+        for (const message of s.messages?.splice(boundary) ?? []) {
+          this.emit(s.info.directory, { type: "message.removed", properties: { sessionID: s.info.id, messageID: message.info.id } });
+        }
+      }
+      this.removeRevertNotice(s, revertNotice(s));
+      delete s.tree.revert;
+      delete s.info.revert;
+      this.persistMeta(s);
+      this.emit(s.info.directory, { type: "session.updated", properties: { info: s.info } });
+    }
 
     // Same funnel as POST /api/session/{id}/model. Failing loudly matters: the
     // previous code swallowed pi's refusal and then reported the *requested*
@@ -456,10 +642,14 @@ export class SessionManager {
         this.persistMeta(s);
       }
     }
+    await this.syncTree(s);
   }
 
   async disposeAll(): Promise<void> {
+    for (const s of this.sessions.values()) s.approvals?.cancelAll();
     await this.lifecycle.stop();
+    this.disposed = true;
+    this.subagents.dispose();
     this.sessions.clear();
   }
 
@@ -492,7 +682,9 @@ export class SessionManager {
     this.lifecycle.touch(s);
     s.piPath = restored.piPath;
     s.piSessionId = restored.piSessionId;
+    if (s.tree.leafId !== undefined) s.tree.leafId = await navigate(pi, s.tree.leafId);
     delete s.restored;
+    s.approvals = this.approvalsFor(s);
     // A restored session pushes pi's real model to the UI rather than leaving
     // the picker on whatever it last showed for this directory.
     this.applyPiModel(s, state.data.model?.provider, state.data.model?.id);
@@ -502,7 +694,11 @@ export class SessionManager {
   }
 
   private ensureMessages(s: ManagedSession): OCMessageWithParts[] {
-    if (s.messages === undefined) s.messages = parsePiSessionFile(s, getAgentName());
+    if (this.subagents.owns(s.info.id)) return this.subagents.messages(s.info.id);
+    if (s.messages === undefined) {
+      s.messages = parsePiSessionFile(s, getAgentName());
+      this.subagents.discover(s, s.messages);
+    }
     return s.messages;
   }
 
@@ -562,6 +758,7 @@ export class SessionManager {
       projectID: sc.directory,
       directory: sc.directory,
       title: reg?.title ?? sc.title,
+      ...(reg?.tree?.revert ? { revert: { messageID: reg.tree.revert.messageID } } : {}),
       version: ADAPTER_VERSION,
       time: {
         created: sc.created,
@@ -570,6 +767,7 @@ export class SessionManager {
       },
     };
     const managed: ManagedSession = {
+      tree: reg?.tree ?? { messageEntries: {} },
       info,
       pi: undefined,
       messages: undefined,
@@ -582,11 +780,19 @@ export class SessionManager {
       hasRunningChildren: () => false,
     };
     this.sessions.set(ocId, managed);
+    this.subagents.wire(managed);
     return managed;
   }
 
   /** Resolve a bare session id (e.g. deep link after restart) via known directories. */
   private resolveRestored(sessionId: string): ManagedSession | undefined {
+    const reg = this.store.get(sessionId);
+    if (reg && existsSync(reg.piPath)) {
+      return this.adopt({
+        piSessionId: reg.piSessionId, piPath: reg.piPath, directory: reg.directory,
+        title: reg.title ?? "New session", created: reg.created, updated: reg.updated,
+      });
+    }
     const dirs = new Set<string>([
       ...this.store.directories(),
       ...[...this.sessions.values()].map((s) => s.info.directory),
@@ -606,6 +812,7 @@ export class SessionManager {
     const piSessionId = s.piSessionId ?? s.restored?.piSessionId;
     if (piPath === undefined || piSessionId === undefined) return;
     this.store.set(s.info.id, {
+      tree: s.tree,
       piSessionId,
       piPath,
       directory: s.info.directory,
@@ -638,6 +845,7 @@ export class SessionManager {
   }
 
   private onPiEvent(s: ManagedSession, ev: Record<string, unknown>): void {
+    this.subagents.wake(s, ev);
     const dir = s.info.directory;
     if (process.env.OCPI_DEBUG) {
       const ame = (ev.assistantMessageEvent as { type?: string } | undefined)?.type;
@@ -645,24 +853,71 @@ export class SessionManager {
       appendFileSync(target, `[pi-event] ${String(ev.type)}${ame ? `/${ame}` : ""} ${JSON.stringify(ev).slice(0, 300)}\n`);
     }
     switch (ev.type) {
+      case "entry_appended": {
+        s.todoBridge ??= new TodoBridge(s.info.id);
+        const event = s.todoBridge.entry(ev.entry, (part) => this.emitPart(s, part));
+        if (event !== undefined) this.emit(dir, event);
+        break;
+      }
       case "agent_start":
         this.setStatus(s, { type: "busy" });
         break;
 
       case "agent_end": {
         if (ev.willRetry === true) break; // auto-retry keeps the session busy
+        s.approvals?.finishTurn();
         this.finalizeDanglingTools(s);
+        this.subagents.finishCalls(s.info.id);
         this.finishStreaming(s);
         this.setStatus(s, { type: "idle" });
         this.emit(dir, { type: "session.idle", properties: { sessionID: s.info.id } });
         if (s.piPath !== undefined) this.store.update(s.info.id, { updated: Date.now() });
+        recordTurn(s);
+        this.persistMeta(s);
         break;
       }
 
       case "turn_end": {
+        s.approvals?.finishTurn();
         // pi delivers tool results here, matched back to parts by toolCallId.
         const results = ev.toolResults as Array<Record<string, unknown>> | undefined;
         if (Array.isArray(results)) this.applyToolResults(s, results);
+        break;
+      }
+
+      case "tool_execution_start": {
+        if (typeof ev.toolCallId === "string" && typeof ev.toolName === "string") {
+          s.approvals?.noteToolStart(ev.toolCallId, ev.toolName, ev.args);
+        }
+        if (ev.toolName === "task") break; // Expanded when the argument stream closes.
+        const callID = typeof ev.toolCallId === "string" ? ev.toolCallId : undefined;
+        const part = callID !== undefined ? s.toolByCallId.get(callID) : undefined;
+        if (part === undefined) break;
+        const name = typeof ev.toolName === "string" ? ev.toolName : part.tool;
+        const mapped = mapTool(name, name === "todo" ? part.state.input : ev.args);
+        part.tool = mapped.tool;
+        part.state = {
+          status: "running", input: mapped.input, title: mapped.title,
+          ...(mapped.metadata !== undefined ? { metadata: mapped.metadata } : {}),
+          time: { start: part.state.status !== "pending" ? part.state.time.start : Date.now() },
+        };
+        this.emitPart(s, part);
+        break;
+      }
+
+      case "tool_execution_update": {
+        if (typeof ev.toolCallId === "string" && this.subagents.result(s, ev.toolCallId,
+          ev.partialResult !== null && typeof ev.partialResult === "object" ? ev.partialResult : {}, false)) break;
+        const part = typeof ev.toolCallId === "string" ? s.toolByCallId.get(ev.toolCallId) : undefined;
+        if (part === undefined || part.state.status !== "running") break;
+        this.emitPart(s, part);
+        break;
+      }
+
+      case "tool_execution_end": {
+        if (typeof ev.toolCallId === "string") s.approvals?.noteToolEnd(ev.toolCallId);
+        const result = ev.result !== null && typeof ev.result === "object" ? ev.result : {};
+        this.applyToolResults(s, [{ ...result, toolCallId: ev.toolCallId, isError: ev.isError }]);
         break;
       }
 
@@ -822,6 +1077,7 @@ export class SessionManager {
     }
 
     if (ame.type === "toolcall_start") {
+      if (part.tool === "task") return;
       this.emitPart(s, part);
       return;
     }
@@ -831,7 +1087,7 @@ export class SessionManager {
       // OpenCode pending state is designed exactly for this).
       if (part.state.status === "pending" && typeof ame.delta === "string") {
         (part.state as OCToolStatePending).raw += ame.delta;
-        this.emitPart(s, part);
+        if (part.tool !== "task") this.emitPart(s, part);
       }
       return;
     }
@@ -840,15 +1096,24 @@ export class SessionManager {
       const args = ame.toolCall?.arguments ?? {};
       const callID = ame.toolCall?.id ?? part.callID;
       const name = ame.toolCall?.name ?? part.tool;
+      if (name === "task") {
+        part.callID = callID;
+        this.subagents.start(s, part, args);
+        return;
+      }
+      const mapped = mapTool(name, args);
       part.callID = callID;
-      part.tool = name;
+      part.tool = mapped.tool;
       part.state = {
         status: "running",
-        input: args,
-        title: toolTitle(name, args),
+        input: mapped.input,
+        title: mapped.title,
+        ...(mapped.metadata !== undefined ? { metadata: mapped.metadata } : {}),
         time: { start: Date.now() },
       };
       s.toolByCallId.set(callID, part);
+      s.todoBridge ??= new TodoBridge(s.info.id);
+      s.todoBridge.track(part, args);
       this.emitPart(s, part);
       this.emit(dir, { type: "message.updated", properties: { info: streaming.message } });
       return;
@@ -869,26 +1134,31 @@ export class SessionManager {
   private applyToolResults(s: ManagedSession, results: Array<Record<string, unknown>>): void {
     for (const tr of results) {
       const callID = typeof tr.toolCallId === "string" ? tr.toolCallId : undefined;
+      if (callID !== undefined && this.subagents.result(s, callID, tr, true)) continue;
       const part = callID !== undefined ? s.toolByCallId.get(callID) : undefined;
       if (!part || callID === undefined) continue;
       s.toolByCallId.delete(callID);
+      s.todoBridge?.finish(part, tr.isError === true);
       const text = resultText(tr.content);
       const startedAt = part.state.status !== "pending" ? part.state.time.start : Date.now();
       const input = part.state.input ?? {};
+      const metadata = { ...(part.state.status !== "pending" ? part.state.metadata : {}), ...resultMetadata(part.tool, tr) };
+      const title = part.state.status === "running" || part.state.status === "completed" ? part.state.title ?? part.tool : part.tool;
       if (tr.isError === true) {
         part.state = {
           status: "error",
           input,
-          error: text ?? `tool ${part.tool} failed`,
+          error: text || `tool ${part.tool} failed`,
+          metadata,
           time: { start: startedAt, end: Date.now() },
         };
       } else {
         part.state = {
           status: "completed",
           input,
-          output: text ?? "",
-          title: toolTitle(part.tool, input),
-          metadata: {},
+          output: text,
+          title,
+          metadata,
           time: { start: startedAt, end: Date.now() },
         };
       }
@@ -949,25 +1219,6 @@ interface PiUsage {
   stopReason?: string;
 }
 
-/** Human title: `bash: <command>` / `write: <path>`, else the tool name. */
-function toolTitle(tool: string, args: Record<string, unknown>): string {
-  const cmd = typeof args.command === "string" ? args.command : undefined;
-  const path = typeof args.path === "string" ? args.path : undefined;
-  const hint = cmd ?? path;
-  if (hint === undefined) return tool;
-  const short = hint.length > 60 ? `${hint.slice(0, 57)}…` : hint;
-  return `${tool}: ${short}`;
-}
-
-/** pi toolResult content blocks → joined text. */
-function resultText(content: unknown): string | undefined {
-  if (!Array.isArray(content)) return undefined;
-  const text = content
-    .map((b) => (b && typeof b === "object" && typeof (b as { text?: unknown }).text === "string" ? (b as { text: string }).text : ""))
-    .join("");
-  return text === "" ? undefined : text;
-}
-
 // ----------------------------------------------------------------------
 // Restored-session history: pi JSONL file → OpenCode messages + parts
 // ----------------------------------------------------------------------
@@ -980,6 +1231,8 @@ interface PiFileEntry {
   provider?: string;
   modelId?: string;
   message?: PiFileMessage;
+  customType?: string;
+  details?: unknown;
 }
 
 interface PiFileMessage {
@@ -993,6 +1246,7 @@ interface PiFileMessage {
   toolCallId?: string;
   toolName?: string;
   isError?: boolean;
+  details?: unknown;
 }
 
 function entryTime(e: PiFileEntry): number {
@@ -1022,20 +1276,25 @@ function textOf(content: Array<Record<string, unknown>> | undefined): string {
 function parsePiSessionFile(s: ManagedSession, agentName: string): OCMessageWithParts[] {
   const piPath = s.piPath ?? s.restored?.piPath;
   if (piPath === undefined) return [];
-  const sessionID = s.info.id;
-  const directory = s.info.directory;
   let raw: string;
   try {
     raw = readFileSync(piPath, "utf8");
   } catch {
     return [];
   }
+  return parsePiSessionText(s, agentName, raw);
+}
+
+function parsePiSessionText(s: ManagedSession, agentName: string, raw: string): OCMessageWithParts[] {
+  const sessionID = s.info.id;
+  const directory = s.info.directory;
 
   const entries: PiFileEntry[] = [];
   for (const line of raw.split("\n")) {
     if (line.length === 0) continue;
     try {
-      entries.push(JSON.parse(line) as PiFileEntry);
+      const value = JSON.parse(line) as PiFileEntry | null;
+      if (value !== null && typeof value === "object") entries.push(value);
     } catch {
       /* torn trailing write — ignore */
     }
@@ -1051,6 +1310,8 @@ function parsePiSessionFile(s: ManagedSession, agentName: string): OCMessageWith
     if (e.type !== "message") continue;
     if (leaf === undefined || entryTime(e) >= entryTime(leaf)) leaf = e;
   }
+  const selectedLeaf = s.tree.revert ? s.tree.revert.previousLeafId : s.tree.leafId;
+  if (selectedLeaf !== undefined) leaf = selectedLeaf === null ? undefined : byId.get(selectedLeaf);
   const chain: PiFileEntry[] = [];
   const seen = new Set<PiFileEntry>();
   for (let cur = leaf; cur !== undefined && !seen.has(cur); ) {
@@ -1061,7 +1322,7 @@ function parsePiSessionFile(s: ManagedSession, agentName: string): OCMessageWith
   chain.reverse();
 
   const out: OCMessageWithParts[] = [];
-  const toolParts = new Map<string, OCToolPart>();
+  const toolParts = new Map<string, OCToolPart[]>();
   let currentModel: OCModelRef = { providerID: "unknown", modelID: "unknown" };
   let lastUserId = "";
 
@@ -1079,7 +1340,8 @@ function parsePiSessionFile(s: ManagedSession, agentName: string): OCMessageWith
     if (m.role === "user") {
       const text = textOf(m.content);
       if (text === "") continue;
-      const msgId = `msg_r${idx}`;
+      const msgId = Object.keys(s.tree.messageEntries).find((key) => s.tree.messageEntries[key] === e.id) ?? `msg_${sessionID}_r${idx}`;
+      if (e.id) s.tree.messageEntries[msgId] = e.id;
       lastUserId = msgId;
       const info: OCUserMessage = {
         id: msgId,
@@ -1090,7 +1352,7 @@ function parsePiSessionFile(s: ManagedSession, agentName: string): OCMessageWith
         model: currentModel,
       };
       const parts: OCPart[] = [
-        { id: `prt_r${idx}_0`, sessionID, messageID: msgId, type: "text", text, time: { start: created, end: created } },
+        { id: `prt_${sessionID}_r${idx}_0`, sessionID, messageID: msgId, type: "text", text, time: { start: created, end: created } },
       ];
       out.push({ info, parts });
       continue;
@@ -1100,7 +1362,8 @@ function parsePiSessionFile(s: ManagedSession, agentName: string): OCMessageWith
       if (typeof m.provider === "string" && typeof m.model === "string") {
         currentModel = { providerID: m.provider, modelID: m.model };
       }
-      const msgId = `msg_r${idx}`;
+      const msgId = Object.keys(s.tree.messageEntries).find((key) => s.tree.messageEntries[key] === e.id) ?? `msg_${sessionID}_r${idx}`;
+      if (e.id) s.tree.messageEntries[msgId] = e.id;
       const info: OCAssistantMessage = {
         id: msgId,
         sessionID,
@@ -1123,7 +1386,7 @@ function parsePiSessionFile(s: ManagedSession, agentName: string): OCMessageWith
       const parts: OCPart[] = [];
       const blocks = Array.isArray(m.content) ? m.content : [];
       blocks.forEach((block, b) => {
-        const partId = `prt_r${idx}_${b}`;
+        const partId = `prt_${sessionID}_r${idx}_${b}`;
         const kind = block?.type;
         if (kind === "text" && typeof block.text === "string") {
           parts.push({ id: partId, sessionID, messageID: msgId, type: "text", text: block.text, time: { start: created, end: created } });
@@ -1134,17 +1397,23 @@ function parsePiSessionFile(s: ManagedSession, agentName: string): OCMessageWith
           const tool = typeof block.name === "string" ? block.name : "unknown";
           const args = block.arguments;
           const input = args !== null && typeof args === "object" ? (args as Record<string, unknown>) : {};
+          const mapped = mapTool(tool, input);
           const part: OCToolPart = {
             id: partId,
             sessionID,
             messageID: msgId,
             type: "tool",
             callID,
-            tool,
-            state: { status: "running", input, title: toolTitle(tool, input), time: { start: created } },
+            tool: mapped.tool,
+            state: {
+              status: "running", input: mapped.input, title: mapped.title,
+              ...(mapped.metadata !== undefined ? { metadata: mapped.metadata } : {}),
+              time: { start: created },
+            },
           };
-          toolParts.set(callID, part);
-          parts.push(part);
+          const mappedParts = tool === "task" ? taskParts(part, input) : [part];
+          toolParts.set(callID, mappedParts);
+          parts.push(...mappedParts);
         }
       });
       out.push({ info, parts });
@@ -1153,25 +1422,47 @@ function parsePiSessionFile(s: ManagedSession, agentName: string): OCMessageWith
 
     if (m.role === "toolResult") {
       const callID = typeof m.toolCallId === "string" ? m.toolCallId : undefined;
-      const part = callID !== undefined ? toolParts.get(callID) : undefined;
+      const matching = callID !== undefined ? toolParts.get(callID) : undefined;
+      const part = matching?.[0];
       if (part === undefined) continue; // result without a visible call (abandoned branch)
+      if (part.tool === "task" && matching !== undefined) {
+        updateTaskParts(matching, m, true, created);
+        continue;
+      }
       const text = resultText(m.content) ?? "";
       const startedAt = part.state.status !== "pending" ? part.state.time.start : created;
       const input = part.state.input ?? {};
+      const metadata = { ...(part.state.status !== "pending" ? part.state.metadata : {}), ...resultMetadata(part.tool, m) };
+      const title = part.state.status === "running" || part.state.status === "completed" ? part.state.title ?? part.tool : part.tool;
       part.state =
         m.isError === true
-          ? { status: "error", input, error: text !== "" ? text : `tool ${part.tool} failed`, time: { start: startedAt, end: created } }
+          ? { status: "error", input, error: text !== "" ? text : `tool ${part.tool} failed`, metadata, time: { start: startedAt, end: created } }
           : {
               status: "completed",
               input,
               output: text,
-              title: toolTitle(part.tool, input),
-              metadata: {},
+              title,
+              metadata,
               time: { start: startedAt, end: created },
             };
       continue;
     }
     // system / custom entries are not rendered
+  }
+  s.todoBridge = new TodoBridge(sessionID);
+  s.todoBridge.restore(entries, new Map([...toolParts].flatMap(([callID, parts]) => (parts[0] ? [[callID, parts[0]] as const] : []))));
+  // Completions can be appended after the newest message, outside its ancestor chain.
+  for (const entry of entries) {
+    if (entry.customType !== "omo-senpi:wake") continue;
+    for (const data of taskCompletions(entry.details)) {
+      for (const parts of toolParts.values()) {
+        for (const part of parts) {
+          if (part.tool === "task" && part.state.status !== "pending" && part.state.metadata?.taskID === data.task_id) {
+            updateTaskParts([part], { details: data }, true, entryTime(entry));
+          }
+        }
+      }
+    }
   }
   return out;
 }

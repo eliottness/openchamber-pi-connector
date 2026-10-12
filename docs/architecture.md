@@ -37,6 +37,36 @@ SDK embed stays an option behind the same internal interface.
 - Adapter owns a process pool keyed by session id, and a directory registry
   mapping OpenCode "project/directory" to pi working directory + session dir.
 
+### OmO session tree
+
+Fork/revert/unrevert use `get_entries` (`entries`, `leafId`) and OmO's
+session-tree RPCs. Explicit-message `fork {entryId}` copies the history before
+the selected user message. OpenChamber restores that prompt into its composer,
+matching OmO's default `"before"` position; including an unanswered user tail
+would make the UI report a failed reply. With no messageID, `position: "at"`
+includes the complete active leaf. Fork returns `{cancelled}` (and sometimes `text`), not
+the new identity: the connector reads `get_state.sessionId/sessionFile`.
+The RPC process switches to that new file. It is transferred to the forked
+OpenChamber session; the original becomes dormant and resumes its original
+file in its own process when next used.
+
+The connector records OpenChamber messageID -> OmO entry id in its registry,
+preserving client-generated live IDs across restarts. Restored messages
+without a recorded mapping use the existing `msg_r<JSONL offset>` scheme.
+Revert navigates to the selected user's parent with `intent: "resume"`:
+without that intent OmO's tree selection would skip user/custom-message
+parents. The registry saves the previous leaf, current leaf, and cutoff
+messageID. Repeated revert retains the original redo leaf. Unrevert restores
+it; a new prompt clears the cutoff and starts a branch at the earlier leaf.
+Revival reapplies the saved leaf rather than assuming the newest JSONL
+message is the active branch. The reverted transcript is retained for redo.
+
+Revert only changes conversation context. It never invokes a filesystem
+restore, snapshot, or diff operation. An adapter-only informational text
+message before the cutoff says "Conversation reverted. Files were not
+changed." and is not sent to the model. Unknown messageIDs are rejected with
+HTTP 400 before navigation.
+
 ### Event translation
 
 | OpenCode (SSE `event`) | pi (stdout JSONL) |

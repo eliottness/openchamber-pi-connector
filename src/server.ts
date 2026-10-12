@@ -9,6 +9,7 @@ import { execFile } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { SessionManager } from "./sessions.js";
 import { ApprovalInputError, toV2Permission } from "./approvals.js";
+import type { TodoUpdated } from "./todo-bridge.js";
 import { getAgentName, getExposedAgentNames } from "./agent-name.js";
 import { loadCatalog, type Catalog } from "./catalog.js";
 import {
@@ -113,9 +114,12 @@ export class AdapterServer {
   // SSE
   // ---------------------------------------------------------------
 
-  private broadcast(_directory: string, event: OCEvent): void {
+  private broadcast(_directory: string, event: OCEvent | TodoUpdated): void {
     const v1Frame = `data: ${JSON.stringify(event)}\n\n`;
-    const v2Frames = this.v2events.translate(_directory, event).map((frame) => `data: ${JSON.stringify(frame)}\n\n`);
+    const frames = event.type === "todo.updated"
+      ? [{ id: `evt_${randomUUID()}`, type: event.type, location: { directory: _directory }, data: event.properties }]
+      : this.v2events.translate(_directory, event);
+    const v2Frames = frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`);
     for (const [res, flavor] of this.sseClients) {
       if (flavor === "v2") {
         for (const frame of v2Frames) res.write(frame);
@@ -257,6 +261,9 @@ export class AdapterServer {
           return;
         case "GET /message":
           this.json(res, 200, this.sessions.messages(sessionId!));
+          return;
+        case "GET /todo":
+          this.json(res, 200, this.sessions.todos(sessionId!));
           return;
         case "POST /prompt_async": {
           const body = (await this.body(req)) as OCPromptBody;
@@ -714,6 +721,9 @@ export class AdapterServer {
       }
 
       switch (`${method} ${sub}`) {
+        case "GET /todo":
+          this.json(res, 200, { data: this.sessions.todos(sessionId) });
+          return;
         case "GET ": {
           this.json(res, 200, { data: this.v2Session(managed.info) });
           return;

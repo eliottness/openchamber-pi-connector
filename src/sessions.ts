@@ -11,6 +11,7 @@ import { SessionLifecycle, type LifecycleOptions } from "./lifecycle.js";
 import { ApprovalBridge, extensionUiRequestFrom, type PendingPermission, type PendingQuestion } from "./approvals.js";
 import { getAgentName } from "./agent-name.js";
 import { mapTool, resultMetadata, resultText } from "./tool-map.js";
+import { TodoBridge, type Todo, type TodoUpdated } from "./todo-bridge.js";
 import { ocIdFor, piSessionDir, piSessionsRootMtime, scanAllPiSessions, scanPiSessions, SessionStore, type ScannedSession } from "./session-store.js";
 import type {
   OCAssistantMessage,
@@ -57,6 +58,7 @@ export interface ManagedSession {
    */
   toolByCallId: Map<string, OCToolPart>;
   approvals?: ApprovalBridge;
+  todoBridge?: TodoBridge;
   /** pi's own session id + file — the bridge to persistence/restore. */
   piSessionId?: string;
   piPath?: string;
@@ -67,7 +69,7 @@ export interface ManagedSession {
   hasRunningChildren: () => boolean;
 }
 
-type EventSink = (directory: string, event: OCEvent) => void;
+type EventSink = (directory: string, event: OCEvent | TodoUpdated) => void;
 
 interface PiModel {
   id: string;
@@ -298,13 +300,25 @@ export class SessionManager {
   messages(sessionId: string): OCMessageWithParts[] | undefined {
     const s = this.get(sessionId);
     if (!s) return undefined;
-    return this.ensureMessages(s);
+    const messages = this.ensureMessages(s);
+    // OpenChamber also hydrates the panel through SSE when reopening history.
+    if (s.todoBridge !== undefined) {
+      this.emit(s.info.directory, { type: "todo.updated", properties: { sessionID: s.info.id, todos: s.todoBridge.todos } });
+    }
+    return messages;
   }
 
   statuses(): Record<string, OCSessionStatus> {
     const out: Record<string, OCSessionStatus> = {};
     for (const s of this.sessions.values()) out[s.info.id] = s.status; // dormant sessions are idle
     return out;
+  }
+
+  todos(sessionId: string): Todo[] | undefined {
+    const s = this.get(sessionId);
+    if (!s) return undefined;
+    this.ensureMessages(s);
+    return s.todoBridge?.todos ?? [];
   }
 
   async abort(sessionId: string): Promise<boolean> {
@@ -690,6 +704,12 @@ export class SessionManager {
       appendFileSync(target, `[pi-event] ${String(ev.type)}${ame ? `/${ame}` : ""} ${JSON.stringify(ev).slice(0, 300)}\n`);
     }
     switch (ev.type) {
+      case "entry_appended": {
+        s.todoBridge ??= new TodoBridge(s.info.id);
+        const event = s.todoBridge.entry(ev.entry, (part) => this.emitPart(s, part));
+        if (event !== undefined) this.emit(dir, event);
+        break;
+      }
       case "agent_start":
         this.setStatus(s, { type: "busy" });
         break;
@@ -720,7 +740,8 @@ export class SessionManager {
         const callID = typeof ev.toolCallId === "string" ? ev.toolCallId : undefined;
         const part = callID !== undefined ? s.toolByCallId.get(callID) : undefined;
         if (part === undefined) break;
-        const mapped = mapTool(typeof ev.toolName === "string" ? ev.toolName : part.tool, ev.args);
+        const name = typeof ev.toolName === "string" ? ev.toolName : part.tool;
+        const mapped = mapTool(name, name === "todo" ? part.state.input : ev.args);
         part.tool = mapped.tool;
         part.state = {
           status: "running", input: mapped.input, title: mapped.title,
@@ -930,6 +951,8 @@ export class SessionManager {
         time: { start: Date.now() },
       };
       s.toolByCallId.set(callID, part);
+      s.todoBridge ??= new TodoBridge(s.info.id);
+      s.todoBridge.track(part, args);
       this.emitPart(s, part);
       this.emit(dir, { type: "message.updated", properties: { info: streaming.message } });
       return;
@@ -953,6 +976,7 @@ export class SessionManager {
       const part = callID !== undefined ? s.toolByCallId.get(callID) : undefined;
       if (!part || callID === undefined) continue;
       s.toolByCallId.delete(callID);
+      s.todoBridge?.finish(part, tr.isError === true);
       const text = resultText(tr.content);
       const startedAt = part.state.status !== "pending" ? part.state.time.start : Date.now();
       const input = part.state.input ?? {};
@@ -1246,5 +1270,7 @@ function parsePiSessionFile(s: ManagedSession, agentName: string): OCMessageWith
     }
     // system / custom entries are not rendered
   }
+  s.todoBridge = new TodoBridge(sessionID);
+  s.todoBridge.restore(entries, toolParts);
   return out;
 }

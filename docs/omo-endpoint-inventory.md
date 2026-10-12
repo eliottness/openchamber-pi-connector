@@ -112,24 +112,24 @@ used Haiku 4.5. No file-editing prompt was sent.
 | POST | `/session/{sessionID}/summarize` | 501 | /compact system command | todo 11 (compact, shell, command, share) |
 | POST | `/session/{sessionID}/share` | 501 | Session actions > Share; not cleanly unavailable yet | todo 11 (compact, shell, command, share) |
 | DELETE | `/session/{sessionID}/share` | static-only; not requested | Unshare; unreachable because Share fails | todo 11 (compact, shell, command, share) |
-| GET | `/session/{sessionID}/diff` | 501 (probe) | Changes panel; current empty non-git surface uses native Git API | todo 12 (diff + everything else) |
-| GET | `/file` | 404 (probe) | Files SDK route; native Files browser still renders empty work directory | todo 12 (diff + everything else) |
-| GET | `/find/file` | 404 (probe) | SDK file search and file mentions; inline /api/find/file caller | todo 12 (diff + everything else) |
-| GET | `/skill` | 404 | Bootstrap skill probe; Skills settings/menu use native config APIs | todo 12 (diff + everything else) |
-| GET | `/provider/auth` | 404 (probe) | Providers authentication methods; static UI caller | todo 12 (diff + everything else) |
-| PUT | `/auth/{providerID}` | static-only; not requested | Providers API key connection; no credentials changed | todo 12 (diff + everything else) |
-| POST | `/provider/{providerID}/oauth/authorize` | static-only; not requested | Providers OAuth connection; no authentication started | todo 12 (diff + everything else) |
-| POST | `/provider/{providerID}/oauth/callback` | static-only; not requested | Providers OAuth completion | todo 12 (diff + everything else) |
-| PATCH | `/config` | static-only; not requested | SDK configuration update; no backend config edited | todo 12 (diff + everything else) |
-| GET | `/mcp` | 200 ({}) | MCP bootstrap/status; native settings show existing MCP definitions | todo 12 (diff + everything else) |
-| POST | `/mcp/{name}/connect` | static-only; not requested | MCP connect; no global server connections changed | todo 12 (diff + everything else) |
-| POST | `/mcp/{name}/disconnect` | static-only; not requested | MCP disconnect | todo 12 (diff + everything else) |
-| POST | `/mcp/{name}/auth` | static-only; not requested | MCP OAuth start | todo 12 (diff + everything else) |
-| DELETE | `/mcp/{name}/auth` | static-only; not requested | MCP authentication removal | todo 12 (diff + everything else) |
-| POST | `/mcp/{name}/auth/callback` | static-only; not requested | MCP OAuth callback | todo 12 (diff + everything else) |
-| POST | `/mcp/{name}/auth/authenticate` | static-only; not requested | MCP OAuth authenticate action | todo 12 (diff + everything else) |
-| POST | `/experimental/control-plane/move-session` | static-only; not requested | Runtime/session relocation; not available in isolated single workspace | todo 12 (diff + everything else) |
-| GET | `/experimental/tool/ids` | static-only; not requested | Agent/settings available-tools picker | todo 12 (diff + everything else) |
+| GET | `/session/{sessionID}/diff` | 200; HEAD content, current content, numstat and patch | Changes panel; native Git API also supplies working-tree changes | implemented (todo 12) |
+| GET | `/file` | 200 FileNode[]; 400 escaping path | Files SDK route; confined directory listing | implemented (todo 12) |
+| GET | `/find/file` | 200 string[]; 400 traversal | SDK file search and file mentions; inline /api/find/file caller | implemented (todo 12) |
+| GET | `/skill` | 200 [] | Bootstrap skill probe; Skills settings/menu use native config APIs | unavailable (todo 12) |
+| GET | `/provider/auth` | 200 {} | Providers authentication methods; no connector-managed methods | unavailable (todo 12) |
+| PUT | `/auth/{providerID}` | 400 UnsupportedError | Providers API key connection; UI catches failed save | unavailable (todo 12) |
+| POST | `/provider/{providerID}/oauth/authorize` | 400 UnsupportedError | Providers OAuth connection; UI enters failed phase | unavailable (todo 12) |
+| POST | `/provider/{providerID}/oauth/callback` | 400 UnsupportedError | Providers OAuth completion; UI enters failed phase | unavailable (todo 12) |
+| PATCH | `/config` | 400 UnsupportedError | SDK configuration update; no OmO config mutation | unavailable (todo 12) |
+| GET | `/mcp` | 200 {} | MCP bootstrap/status; native settings show existing MCP definitions | unavailable (todo 12) |
+| POST | `/mcp/{name}/connect` | 400 UnsupportedError | MCP connect; UI records failed diagnostic | unavailable (todo 12) |
+| POST | `/mcp/{name}/disconnect` | 400 UnsupportedError | MCP disconnect; UI handles rejected action | unavailable (todo 12) |
+| POST | `/mcp/{name}/auth` | 400 UnsupportedError | MCP OAuth start; no fabricated authorization URL | unavailable (todo 12) |
+| DELETE | `/mcp/{name}/auth` | 400 UnsupportedError | MCP authentication removal; no OmO config mutation | unavailable (todo 12) |
+| POST | `/mcp/{name}/auth/callback` | 400 UnsupportedError | MCP OAuth callback; no OmO config mutation | unavailable (todo 12) |
+| POST | `/mcp/{name}/auth/authenticate` | 400 UnsupportedError | MCP OAuth authenticate action; UI records failed diagnostic | unavailable (todo 12) |
+| POST | `/experimental/control-plane/move-session` | 400 UnsupportedError | Runtime/session relocation unavailable; no misleading success | unavailable (todo 12) |
+| GET | `/experimental/tool/ids` | 200 [] | Agent/settings available-tools picker; RPC has no tool catalog command | unavailable (todo 12) |
 | GET | `/lsp` | 200 ([]) | Bootstrap language-server status; handled empty list | unavailable |
 | GET | `/formatter` | 200 ([]) (probe) | SDK formatter status; handled empty list | unavailable |
 | GET | `/vcs` | 200 ({}) | Git/context bootstrap for non-git work directory | implemented |
@@ -198,6 +198,43 @@ claiming health survived. Full failure receipt and request excerpts accompany
 the screenshots.
 
 ## Verification
+
+### Todo 12 contract closure
+
+`/api/session/{sessionID}/diff` is the connector's alternate envelope API and
+returns `{data: FileDiff[]}`. The installed SDK v2 uses the same unprefixed
+`/session/{sessionID}/diff` path as v1: legacy v1 FileDiff has before/after,
+whereas current v2 SnapshotFileDiff carries patch and status. Both are included.
+The bundled reducer stores `session.diff.properties.diff` by sessionID.
+
+Only completed mapped write/edit/multiedit parts contribute paths. GET recomputes
+the diff; completed editing turns emit SSE session.diff. Tracked content is
+compared with HEAD, not a pre-turn snapshot. Thus pre-existing uncommitted changes
+in a touched file are included, but unrelated dirty files are excluded. Untracked
+files have empty before content and added-file patches. Non-git files have empty
+before content, zero counts and an empty patch (file list, without hunks).
+Paths and symlink targets outside the session directory are excluded.
+
+Empty catalogs describe capabilities the connector does not expose, rather than
+pretending to mutate OmO. Auth/OAuth/config updates return 400 with
+`Not supported with OmO; configure providers in OmO`. MCP and relocation return
+400 with a corresponding OmO configuration message. Bundle callers explicitly
+catch provider and MCP errors; none requires a fabricated 200 mutation result.
+No installed OpenChamber or OmO configuration is changed.
+
+HTTP and agent logging share one failure latch: an unwritable debug log disables
+logging and prints one stderr warning. Session titles are trimmed on creation,
+derived from the first prompt, persisted immediately, and included in complete
+session.updated metadata on every prompt and completed run. The header reads the
+active/archived sync-store session title; the sidebar also has a separate list.
+It does not read a message summary title. The root cause of the intermittent
+header fallback was the experimental list's archived flag: OpenChamber loads
+its global title store with `archived=true` meaning include archived, then
+partitions live/archived locally. The connector previously returned only archived
+sessions, so periodic refresh discarded the live title while the sidebar's
+directory list kept it. The experimental route now includes all sessions for
+true/absent and excludes archived for false. Legacy `/session` filtering is
+unchanged. The title regression exercises this exact global list query.
 
 `npm ci` passed with 0 vulnerabilities. `npm run build` and `npm test`
 passed once under Node 22.23.1 (1 test, 0 failures). No new test was added for

@@ -356,6 +356,8 @@ export class V2EventTranslator {
         const info = ev.properties.info;
         return [this.frame(directory, "session.renamed", { sessionID: info.id, title: info.title })];
       }
+      case "session.diff":
+        return [this.frame(directory, "session.diff", ev.properties)];
       case "session.deleted": {
         const info = ev.properties.info;
         this.sessions.delete(info.id);

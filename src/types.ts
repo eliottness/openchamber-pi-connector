@@ -134,6 +134,7 @@ export interface OCMessageWithParts {
 export type OCSessionStatus = { type: "idle" } | { type: "busy" } | { type: "retry"; attempt: number; message: string; next: number };
 
 export type OCEvent =
+  | { type: "session.diff"; properties: { sessionID: string; diff: import("./session-diff.js").SessionFileDiff[] } }
   | { type: "server.connected"; properties: Record<string, unknown> }
   | { type: "session.created"; properties: { info: OCSession } }
   | { type: "session.updated"; properties: { info: OCSession } }

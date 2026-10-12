@@ -1,0 +1,77 @@
+{
+  "tool": "update_goal",
+  "samples": [
+    {
+      "arguments": {
+        "status": "complete"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "{\n  \"goal\": {\n    \"threadId\": \"01a0b4e1-99ca-7531-8a1b-5de0a2dc5195\",\n    \"objective\": \"Change the search-result click map panning so the selected pin ends up centered on screen (currently it does a minimum-visibility pan). Scope the change to the search-result coordinate-focus case only. Then: run affected tests + diagnostics, commit and push, open/identify the MR, review it with subagents, fix t…"
+        }
+      ],
+      "details": {
+        "goal": {
+          "threadId": "01a0b4e1-99ca-7531-8a1b-5de0a2dc5195",
+          "objective": "Change the search-result click map panning so the selected pin ends up centered on screen (currently it does a minimum-visibility pan). Scope the change to the search-result coordinate-focus case only. Then: run affected tests + diagnostics, commit and push, open/identify the MR, review it with subagents, fix the findings, commit and push fixes, and merge the MR. Follow repo AGENTS.md/CONTRIBUTING…",
+          "status": "complete",
+          "timeUsedSeconds": 2684,
+          "createdAt": 1789741250,
+          "updatedAt": 1789746678
+        }
+      },
+      "isError": false
+    },
+    {
+      "arguments": {
+        "status": "blocked",
+        "reason": "Blocked on Eliott's explicit approval before implementing any fix (his standing rule + the objective's \"WAIT for approval; do NOT start fixing until approved\"). The Hallmark root-cause ledger is complete (.omo/evidence/placesview-day-view-snake-upgrade/qa-round-2-ledger.md) with verbatim items, root causes, and item 8 narrowed to the dnd-kit drop/settle lifecycle. Five decisions only the user can …"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "{\n  \"goal\": {\n    \"threadId\": \"01a0ba5d-74dd-7930-9a5d-a012b23220be\",\n    \"objective\": \"Address round-2 manual QA on the PlacesView day-view snake feature (MR !145, branch feat/snake-view-places). 8 reported items:\\n1) Console log: Error: No route matches URL \\\"/installHook.js.map\\\".\\n2) Web console warning: \\\"Unexpected text node: 1h 30m. A text node cannot be a child of a <View>\\\" from the colle…"
+        }
+      ],
+      "details": {
+        "goal": {
+          "threadId": "01a0ba5d-74dd-7930-9a5d-a012b23220be",
+          "objective": "Address round-2 manual QA on the PlacesView day-view snake feature (MR !145, branch feat/snake-view-places). 8 reported items:\n1) Console log: Error: No route matches URL \"/installHook.js.map\".\n2) Web console warning: \"Unexpected text node: 1h 30m. A text node cannot be a child of a <View>\" from the collection-card-meta View (CollectionCard.tsx ~231) — raw string child not wrapped in Text.\n3) Card…",
+          "status": "blocked",
+          "timeUsedSeconds": 648,
+          "createdAt": 1789896698,
+          "updatedAt": 1789897347,
+          "blockedReason": "Blocked on Eliott's explicit approval before implementing any fix (his standing rule + the objective's \"WAIT for approval; do NOT start fixing until approved\"). The Hallmark root-cause ledger is complete (.omo/evidence/placesview-day-view-snake-upgrade/qa-round-2-ledger.md) with verbatim items, root causes, and item 8 narrowed to the dnd-kit drop/settle lifecycle. Five decisions only the user can …",
+          "blockedAt": 1789897347
+        }
+      },
+      "isError": false
+    },
+    {
+      "arguments": {
+        "status": "blocked",
+        "reason": "Blocked on Eliott's explicit approval + design decisions before implementing (his standing \"same process as before: wait for approval; do not start fixing until approved\"). All non-gated round-3 work is complete and evidenced: Hallmark ledger at .omo/evidence/placesview-day-view-snake-upgrade/qa-round-3-ledger.md (+ qa-round-3-comb-design.md); root causes for items 1-4 (item 1 empirically confirme…"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "{\n  \"goal\": {\n    \"threadId\": \"01a0ba5d-74dd-7930-9a5d-a012b23220be\",\n    \"objective\": \"Round-3 manual QA on the PlacesView day-view feature (MR !145, branch feat/snake-view-places). 4 reported items:\\n1) After dragging a card, the card's hover state stays ON instead of clearing when the mouse leaves; after moving several cards, ALL cards show the Details button + grab handle permanently. (Regress…"
+        }
+      ],
+      "details": {
+        "goal": {
+          "threadId": "01a0ba5d-74dd-7930-9a5d-a012b23220be",
+          "objective": "Round-3 manual QA on the PlacesView day-view feature (MR !145, branch feat/snake-view-places). 4 reported items:\n1) After dragging a card, the card's hover state stays ON instead of clearing when the mouse leaves; after moving several cards, ALL cards show the Details button + grab handle permanently. (Regression from round-2 hover overlay: isHovered/focus state not reset after a drag; mouseleave …",
+          "status": "blocked",
+          "timeUsedSeconds": 840,
+          "createdAt": 1789902740,
+          "updatedAt": 1789903581,
+          "blockedReason": "Blocked on Eliott's explicit approval + design decisions before implementing (his standing \"same process as before: wait for approval; do not start fixing until approved\"). All non-gated round-3 work is complete and evidenced: Hallmark ledger at .omo/evidence/placesview-day-view-snake-upgrade/qa-round-3-ledger.md (+ qa-round-3-comb-design.md); root causes for items 1-4 (item 1 empirically confirme…",
+          "blockedAt": 1789903581
+        }
+      },
+      "isError": false
+    }
+  ]
+}

@@ -1,0 +1,160 @@
+{
+  "tool": "task",
+  "samples": [
+    {
+      "arguments": {
+        "subagent_type": "tracer",
+        "prompt": "Registration smoke test. Do not investigate anything, do not read files, do not run commands. Reply with exactly: TRACER_REGISTERED",
+        "description": "tracer registration smoke test",
+        "task_summary": "Verify the tracer custom subagent resolves and runs"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Subagent type \"tracer\" is not an available agent. Available agents: explore, librarian, omo-senpi-code-reviewer, omo-senpi-gate-reviewer, omo-senpi-qa-executor, plan-consultant, plan-reviewer. Available categories: architect, artistry, deep, quick, ultrabrain, unspecified-high, unspecified-low, visual-engineering, writing."
+        }
+      ],
+      "details": {
+        "task_id": "",
+        "status": "plan_error",
+        "mode": "spawn",
+        "reason": "Subagent type \"tracer\" is not an available agent."
+      },
+      "isError": false
+    },
+    {
+      "arguments": {
+        "run_in_background": true,
+        "category": "deep-low",
+        "tasks": [
+          {
+            "name": "eval-pi-connector",
+            "task_summary": "Evaluate openchamber-pi-connector (OpenChamber -> pi RPC) with OmO",
+            "description": "openchamber-pi-connector eval",
+            "prompt": "Read /tmp/oc-eval/BRIEF.md first and follow its rules and report format exactly.\n\nYour option: https://github.com/qingzhu521/openchamber-pi-connector - an adapter that speaks the OpenCode HTTP/SSE API subset OpenChamber consumes and drives `pi --mode rpc` (one process per session) or the pi SDK underneath. It claims to be tested against OpenChamber 1.24.2 (which is exactly what is installed).\n\nWor…",
+            "isolated": false
+          },
+          {
+            "name": "eval-pi-opencode-bridge",
+            "task_summary": "Evaluate pi-opencode-bridge and OpenChamber-for-pi forks for OmO",
+            "description": "pi-opencode-bridge + forks eval",
+            "prompt": "Read /tmp/oc-eval/BRIEF.md first and follow its rules and report format exactly.\n\nYour option: https://pi.dev/packages/pi-opencode-bridge (npm `pi-opencode-bridge` 0.2.1). First, verify from its source (npm pack / clone into /tmp/oc-eval/pi-opencode-bridge/) what it actually does. Its README suggests it is a pi *extension* that registers OpenCode Zen/Go model endpoints as pi providers - i.e. the o…",
+            "isolated": false
+          },
+          {
+            "name": "eval-codex-bridge",
+            "task_summary": "Evaluate opencode-codex-bridge: OpenChamber -> OpenCode API -> omo app-server",
+            "description": "opencode-codex-bridge eval",
+            "prompt": "Read /tmp/oc-eval/BRIEF.md first and follow its rules and report format exactly.\n\nYour option: https://github.com/racinette/opencode-codex-bridge - a server that exposes OpenCode's HTTP/SSE API backed by a local Codex app-server (it targets `opencode attach` as the frontend; protocol bindings generated from Codex CLI 0.161.0). Hypothesis to test: OpenChamber 1.24.2 -> (OpenCode API) -> this bridge…",
+            "isolated": false
+          },
+          {
+            "name": "eval-native-web-uis",
+            "task_summary": "Evaluate pi-native and codex-native web UIs (pi-web, codex-web) with OmO",
+            "description": "pi-web / codex-web fallback eval",
+            "prompt": "Read /tmp/oc-eval/BRIEF.md first and follow its rules and report format exactly.\n\nYour option is the non-OpenChamber fallback: a web UI that speaks OmO's native protocols directly, no OpenCode emulation. Evaluate two candidates and recommend one:\n(a) https://github.com/jmfederico/pi-web (npm @jmfederico/pi-web) - reportedly the most mature pi web UI (Machine/Project/Workspace/Session hierarchy, fl…",
+            "isolated": false
+          }
+        ]
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Batch running.\n1. eval-pi-connector st_01a12ba2 (running)\n\n[task_id: st_01a12ba2 - continue with task_send(to=\"st_01a12ba2\", message=\"...\")]\n2. eval-pi-opencode-bridge st_01a12ba3 (running)\n\n[task_id: st_01a12ba3 - continue with task_send(to=\"st_01a12ba3\", message=\"...\")]\n3. eval-codex-bridge st_01a12ba4 (running)\n\n[task_id: st_01a12ba4 - continue with task_send(to=\"st_01a12ba4\", message=\"...\")]\n4…"
+        }
+      ],
+      "details": {
+        "task_id": "st_01a12ba2",
+        "run_epoch": 0,
+        "status": "running",
+        "mode": "spawn",
+        "run_in_background": true,
+        "items": [
+          {
+            "task_id": "st_01a12ba2",
+            "run_epoch": 0,
+            "name": "eval-pi-connector",
+            "task_summary": "Evaluate openchamber-pi-connector (OpenChamber -> pi RPC) with OmO",
+            "category": "deep-low",
+            "resolved_model": {
+              "source": "category",
+              "provider": "openai",
+              "model_id": "gpt-6.1-sol",
+              "display": "GPT-6.1 Sol",
+              "variant": "medium"
+            },
+            "status": "running"
+          },
+          {
+            "task_id": "st_01a12ba3",
+            "run_epoch": 0,
+            "name": "eval-pi-opencode-bridge",
+            "task_summary": "Evaluate pi-opencode-bridge and OpenChamber-for-pi forks for OmO",
+            "category": "deep-low",
+            "resolved_model": {
+              "source": "category",
+              "provider": "openai",
+              "model_id": "gpt-6.1-sol",
+              "display": "GPT-6.1 Sol",
+              "variant": "medium"
+            },
+            "status": "running"
+          },
+          {
+            "task_id": "st_01a12ba4",
+            "run_epoch": 0,
+            "name": "eval-codex-bridge",
+            "task_summary": "Evaluate opencode-codex-bridge: OpenChamber -> OpenCode API -> omo app-server",
+            "category": "deep-low",
+            "resolved_model": {
+              "source": "category",
+              "provider": "openai",
+              "model_id": "gpt-6.1-sol",
+              "display": "GPT-6.1 Sol",
+              "variant": "medium"
+            },
+            "status": "running"
+          },
+          {
+            "task_id": "st_01a12ba5",
+            "run_epoch": 0,
+            "name": "eval-native-web-uis",
+            "task_summary": "Evaluate pi-native and codex-native web UIs (pi-web, codex-web) with OmO",
+            "category": "deep-low",
+            "resolved_model": {
+              "source": "category",
+              "provider": "openai",
+              "model_id": "gpt-6.1-sol",
+              "display": "GPT-6.1 Sol",
+              "variant": "medium"
+            },
+            "status": "running"
+          }
+        ]
+      },
+      "isError": false
+    },
+    {
+      "arguments": {
+        "subagent_type": "plan-consultant",
+        "run_in_background": true,
+        "description": "Gap analysis for openchamber-omo-connector plan",
+        "task_summary": "Gap analysis: OpenChamber + OmO connector plan draft",
+        "prompt": "TASK: act as plan-consultant (read-only gap analysis, no file edits). DELIVERABLE: a list of gaps in the planning draft /home/eliott/.omo/drafts/openchamber-omo-connector.md - contradictions, affected users the ideal state (IS rows) forgot, GAP rows with no clear closing component, missing constraints (budget, stack, scale, audience/compliance), unvalidated assumptions, scope creep, missing accept…"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Agent \"plan-consultant\" is plan-gated: it is available only after the user explicitly requests the ulw-plan workflow in this session, and no such request was made. Do not attempt to unlock this gate yourself - retrying this spawn will keep failing. Continue without plan review (self-review instead), or ask the user to start the workflow themselves by running /skill:ulw-plan or by asking for a plan…"
+        }
+      ],
+      "details": {
+        "task_id": "",
+        "status": "denied",
+        "mode": "spawn",
+        "reason": "Agent \"plan-consultant\" is plan-gated: it is available only after the user explicitly requests the ulw-plan workflow in this session, and no such request was made. Do not attempt to unlock this gate yourself - retrying this spawn will keep failing. Continue without plan review (self-review instead), or ask the user to start the workflow themselves by running /skill:ulw-plan or by asking for a plan…"
+      },
+      "isError": false
+    }
+  ]
+}

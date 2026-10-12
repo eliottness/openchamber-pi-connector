@@ -1,0 +1,98 @@
+{
+  "tool": "edit",
+  "samples": [
+    {
+      "arguments": {
+        "path": "/home/eliott/.omo/bin/sync-opencode-agents.py",
+        "edits": [
+          {
+            "oldText": "\"\"\"Sync ~/opencode/agents/*.md into ~/.omo/omo.jsonc top-level `agents`.\n\nThe markdown files stay the source of truth: frontmatter maps to the omo agent\nconfig fields (description/model/variant, permission -> tool denials) and the\nbody becomes the agent prompt. Re-run after editing any agent file.\n\nUsage: sync-opencode-agents.py [--agents-dir DIR] [--config FILE] [--check]\n\"\"\"",
+            "newText": "\"\"\"Sync ~/opencode/agents/*.md into the ~/.omo/omo.jsonc top-level `agents` map.\n\nThe markdown files stay the source of truth: frontmatter maps to omo agent config\nfields (description/model/variant, permission -> tool denials), the body becomes\nthe prompt. Re-run after editing an agent file; senpi picks it up on next start.\n\"\"\""
+          },
+          {
+            "oldText": "def parse_agent_file(path: str) -> tuple[dict, str]:",
+            "newText": "def parse_agent_file(path: str) -> tuple[dict[str, object], str]:"
+          },
+          {
+            "oldText": "    front: dict = {}",
+            "newText": "    front: dict[str, object] = {}"
+          },
+          {
+            "oldText": "def to_agent_entry(front: dict, body: str) -> dict:",
+            "newText": "def to_agent_entry(front: dict[str, object], body: str) -> dict[str, object]:"
+          },
+          {
+            "oldText": "def build_agents(agents_dir: str) -> dict:",
+            "newText": "def build_agents(agents_dir: str) -> dict[str, object]:"
+          }
+        ]
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Successfully replaced 5 block(s) in /home/eliott/.omo/bin/sync-opencode-agents.py."
+        },
+        {
+          "type": "text",
+          "text": "\n\nLSP errors detected in /home/eliott/.omo/bin/sync-opencode-agents.py, please fix:\nerror[basedpyright] (reportIndexIssue) at 38:12: \"__setitem__\" method not defined on type \"object\"\nerror[basedpyright] (reportAttributeAccessIssue) at 57:18: Cannot access attribute \"get\" for class \"object\"\n  Attribute \"get\" is unknown\nerror[basedpyright] (reportAttributeAccessIssue) at 59:18: Cannot access attribu…"
+        }
+      ],
+      "details": {
+        "diff": "   1 #!/usr/bin/env python3\n-  2 \"\"\"Sync ~/opencode/agents/*.md into ~/.omo/omo.jsonc top-level `agents`.\n+  2 \"\"\"Sync ~/opencode/agents/*.md into the ~/.omo/omo.jsonc top-level `agents` map.\n   3 \n-  4 The markdown files stay the source of truth: frontmatter maps to the omo agent\n-  5 config fields (description/model/variant, permission -> tool denials) and the\n-  6 body becomes the agent prompt.…",
+        "patch": "--- /home/eliott/.omo/bin/sync-opencode-agents.py\n+++ /home/eliott/.omo/bin/sync-opencode-agents.py\n@@ -1,12 +1,10 @@\n #!/usr/bin/env python3\n-\"\"\"Sync ~/opencode/agents/*.md into ~/.omo/omo.jsonc top-level `agents`.\n+\"\"\"Sync ~/opencode/agents/*.md into the ~/.omo/omo.jsonc top-level `agents` map.\n \n-The markdown files stay the source of truth: frontmatter maps to the omo agent\n-config fields (desc…",
+        "firstChangedLine": 2
+      },
+      "isError": false
+    },
+    {
+      "arguments": {
+        "path": "/home/eliott/.omo/drafts/openchamber-omo-connector.md",
+        "edits": [
+          {
+            "oldText": "## Findings (cited - path:lines)\n",
+            "newText": "## Findings (cited - path:lines)\n- Connector clone: /tmp/oc-eval/pi-connector @ 5c79876 (= origin/main, no newer commits 2026-10-12). TS, run via tsx from bin/opencode-pi; no unit tests, only contrib/*.ts smokes.\n- Session root hardcoded: src/session-store.ts piSessionDir() + piSessionsRoot() use homedir()/.pi/agent/sessions; ignores PI_CODING_AGENT_DIR / OMO_CODING_AGENT_DIR. Root cause of empty …"
+          }
+        ]
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Successfully replaced 1 block(s) in /home/eliott/.omo/drafts/openchamber-omo-connector.md."
+        }
+      ],
+      "details": {
+        "diff": "    ...\n 37 <!-- Record any default you adopt instead of asking, so the user can veto it at the gate. -->\n 38 <!-- assumption | adopted default | rationale | reversible? -->\n 39 \n 40 ## Findings (cited - path:lines)\n+41 - Connector clone: /tmp/oc-eval/pi-connector @ 5c79876 (= origin/main, no newer commits 2026-10-12). TS, run via tsx from bin/opencode-pi; no unit tests, only contrib/*.ts smokes.\n…",
+        "patch": "--- /home/eliott/.omo/drafts/openchamber-omo-connector.md\n+++ /home/eliott/.omo/drafts/openchamber-omo-connector.md\n@@ -37,8 +37,19 @@\n <!-- Record any default you adopt instead of asking, so the user can veto it at the gate. -->\n <!-- assumption | adopted default | rationale | reversible? -->\n \n ## Findings (cited - path:lines)\n+- Connector clone: /tmp/oc-eval/pi-connector @ 5c79876 (= origin/mai…",
+        "firstChangedLine": 41
+      },
+      "isError": false
+    },
+    {
+      "arguments": {
+        "path": "/home/eliott/.omo/drafts/openchamber-omo-connector.md",
+        "edits": [
+          {
+            "oldText": "<!-- GAP-n | difference between IS-n and today | reason | closed by todo(s) -->\n",
+            "newText": "<!-- GAP-n | difference between IS-n and today | reason | closed by todo(s) -->\nUsers: (1) Eliott, driving OmO agents from OpenChamber in a browser/phone on the LAN (today: Paseo, unstable); (2) OmO itself as the program the connector spawns (must run with its full harness/extensions); (3) Eliott-as-operator maintaining the box (boot, upgrades, memory).\n\nIS-1 | Every existing and new OmO session (…"
+          },
+          {
+            "oldText": "<!-- id | outcome (one line) | status: active|deferred | evidence path -->\n",
+            "newText": "<!-- id | outcome (one line) | status: active|deferred | evidence path -->\nC1 | OmO compatibility (agent dir, binary, agent name, smoke vs OmO tools) | active | src/session-store.ts, src/pi-rpc.ts, src/agent-name.ts\nC2 | Approvals + questions bridge | active | src/pi-rpc.ts handleExtensionUI, src/server.ts:336-340,629-638\nC3 | Feature parity endpoints | active | src/server.ts:285,747,751; docs/api…"
+          }
+        ]
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Successfully replaced 2 block(s) in /home/eliott/.omo/drafts/openchamber-omo-connector.md."
+        }
+      ],
+      "details": {
+        "diff": "    ...\n 27 ## Affected user and ideal state\n 28 <!-- Who this output touches (a customer, another programmer, a program or agent consuming it - often more than one) and how each uses it today and will use it after. -->\n 29 <!-- IS-n | property of the ideal state: nothing snags, feels odd, regresses, or degrades for them | reason -->\n 30 <!-- GAP-n | difference between IS-n and today | reason | cl…",
+        "patch": "--- /home/eliott/.omo/drafts/openchamber-omo-connector.md\n+++ /home/eliott/.omo/drafts/openchamber-omo-connector.md\n@@ -27,12 +27,37 @@\n ## Affected user and ideal state\n <!-- Who this output touches (a customer, another programmer, a program or agent consuming it - often more than one) and how each uses it today and will use it after. -->\n <!-- IS-n | property of the ideal state: nothing snags, f…",
+        "firstChangedLine": 31
+      },
+      "isError": false
+    }
+  ]
+}

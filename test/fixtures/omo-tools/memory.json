@@ -1,0 +1,129 @@
+{
+  "tool": "memory",
+  "samples": [
+    {
+      "arguments": {
+        "command": "create",
+        "file_path": "notes/facts/senpi-custom-subagents.md",
+        "description": "How custom subagents are defined for senpi/omo on this machine (omo.jsonc top-level agents, sync script, tools-map pitfall)",
+        "file_text": "# Custom subagents in senpi (omo-ai plugin)\n\n- senpi core has no agent registry; the subagent catalog lives in the omo-ai plugin\n  (`omo-ai/plugin/extensions/omo-task.js`). There is no markdown agent loader, so\n  `~/opencode/agents/*.md` files are not read by senpi.\n- Custom agents come from `~/.omo/omo.jsonc` `agents.<name>`:\n  `description, prompt, model, models[], reasoning|variant, tools{name:…",
+        "reason": "Record how custom senpi subagents are defined, the deny-only tools pitfall, and the opencode agent sync script"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Memory create committed locally (5e6768f)."
+        }
+      ],
+      "details": {
+        "message": "Memory create committed locally (5e6768f).",
+        "writeNotice": {
+          "sha": "5e6768f56533ce3135f68822cae564a98f34bbcc",
+          "subject": "Record how custom senpi subagents are defined, the deny-only tools pitfall, and the opencode agent sync script",
+          "identity": "eliott-1080cec5",
+          "affected": [
+            {
+              "path": "notes/facts/senpi-custom-subagents.md",
+              "insertions": 22,
+              "deletions": 0
+            }
+          ],
+          "size": {
+            "systemBytes": 3319,
+            "totalBytes": 10655,
+            "fileCount": 10
+          },
+          "timeline": {
+            "entriesToday": 1,
+            "previousEntryAtISO": "2026-09-20T18:15:15+02:00"
+          }
+        }
+      },
+      "isError": false
+    },
+    {
+      "arguments": {
+        "command": "str_replace",
+        "file_path": "notes/facts/senpi-custom-subagents.md",
+        "old_string": "- `~/opencode/agents/*.md` are mirrored into config by\n  `~/.omo/bin/sync-opencode-agents.py` (`--check` reports drift). Re-run after editing\n  an agent file; a senpi session only picks up new agents on restart.",
+        "new_string": "- `~/opencode/agents/*.md` are mirrored into `[senpi].agents` by\n  `~/.omo/bin/sync-opencode-agents.py` (`--check` reports drift). Re-run after editing\n  an agent file; a senpi session only picks up new agents on restart. The senpi scope\n  keeps them out of opencode, which loads the same md files natively.\n- 2026-09-21 split of `~/.omo/omo.jsonc`: shared `categories` (minus `deep-low`),\n  `agents.…",
+        "reason": "Record the omo.jsonc brand-scope split and the [senpi] agent scope after verification"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Memory str_replace committed locally (19cd13d)."
+        }
+      ],
+      "details": {
+        "message": "Memory str_replace committed locally (19cd13d).",
+        "writeNotice": {
+          "sha": "19cd13d3d52eec9040f1afdfd5c0b4c0a97a7c2a",
+          "subject": "Record the omo.jsonc brand-scope split and the [senpi] agent scope after verification",
+          "identity": "eliott-1080cec5",
+          "affected": [
+            {
+              "path": "notes/facts/senpi-custom-subagents.md",
+              "insertions": 10,
+              "deletions": 2
+            }
+          ],
+          "size": {
+            "systemBytes": 3319,
+            "totalBytes": 11491,
+            "fileCount": 10
+          },
+          "timeline": {
+            "entriesToday": 1,
+            "previousEntryAtISO": "2026-09-21T23:48:44+02:00",
+            "lastConsolidationAtISO": "2026-09-21T21:48:44.639Z",
+            "unreflectedSteps": 3
+          }
+        }
+      },
+      "isError": false
+    },
+    {
+      "arguments": {
+        "command": "create",
+        "file_path": "notes/facts/omo-web-ui-setup.md",
+        "description": "WSL web-UI-for-OmO setup: Paseo service + LAN portproxy pattern, OpenChamber connector evaluation and plan decisions (2026-10)",
+        "file_text": "## Paseo (installed 2026-10-07, user calls it \"terribly unstable\")\n- `~/.paseo/config.json` provider `omo` (extends pi, command = omo shim, env PI_CODING_AGENT_DIR=~/.omo/agent).\n- `~/.config/systemd/user/paseo.service` runs `paseo daemon run`; PATH pinned to nvm node v22.23.1 because non-interactive zsh does not load nvm. Linger=yes, systemd=true in wsl.conf.\n- LAN: WSL is NAT (user rejects mirro…",
+        "reason": "Record the Paseo/OpenChamber setup and planning decisions for this environment"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Memory create committed locally (520acc1)."
+        }
+      ],
+      "details": {
+        "message": "Memory create committed locally (520acc1).",
+        "writeNotice": {
+          "sha": "520acc156a614ecb9b4b4000db230ad8aaec9690",
+          "subject": "Record the Paseo/OpenChamber setup and planning decisions for this environment",
+          "identity": "eliott-1080cec5",
+          "affected": [
+            {
+              "path": "notes/facts/omo-web-ui-setup.md",
+              "insertions": 13,
+              "deletions": 0
+            }
+          ],
+          "size": {
+            "systemBytes": 3319,
+            "totalBytes": 20917,
+            "fileCount": 12
+          },
+          "timeline": {
+            "entriesToday": 1,
+            "previousEntryAtISO": "2026-10-11T17:54:54+02:00",
+            "lastConsolidationAtISO": "2026-10-11T15:51:01.760Z",
+            "unreflectedSteps": 10
+          }
+        }
+      },
+      "isError": false
+    }
+  ]
+}

@@ -1,0 +1,194 @@
+{
+  "tool": "ask_user_question",
+  "samples": [
+    {
+      "arguments": {
+        "questions": [
+          {
+            "question": "Where should the patched connector live? I'll need a durable home for ~6-10 patch commits and a pinned version that the service runs from.",
+            "header": "Code home",
+            "multiSelect": false,
+            "options": [
+              {
+                "label": "GitHub fork (Recommended)",
+                "description": "Fork qingzhu521/openchamber-pi-connector to your account, clone to ~/git/openchamber-pi-connector, work on a branch, service pins a commit. Generic fixes (agent-dir env, approvals) also offered upstream as PRs."
+              },
+              {
+                "label": "Local clone only",
+                "description": "Same clone at ~/git/openchamber-pi-connector with local commits, no remote fork. Simpler, but no off-machine backup and no upstream PRs."
+              },
+              {
+                "label": "Upstream PRs, then pin",
+                "description": "Only send PRs upstream and wait for merges before deploying. Cleanest long-term, but blocks deployment on a single maintainer."
+              }
+            ]
+          }
+        ],
+        "waitForAnswer": true
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Code home: GitHub fork (Recommended)"
+        }
+      ],
+      "details": {
+        "resolvedBy": "local_ui",
+        "questions": [
+          {
+            "id": "q1",
+            "header": "Code home",
+            "question": "Where should the patched connector live? I'll need a durable home for ~6-10 patch commits and a pinned version that the service runs from.",
+            "options": [
+              {
+                "label": "GitHub fork (Recommended)",
+                "description": "Fork qingzhu521/openchamber-pi-connector to your account, clone to ~/git/openchamber-pi-connector, work on a branch, service pins a commit. Generic fixes (agent-dir env, approvals) also offered upstream as PRs."
+              },
+              {
+                "label": "Local clone only",
+                "description": "Same clone at ~/git/openchamber-pi-connector with local commits, no remote fork. Simpler, but no off-machine backup and no upstream PRs."
+              },
+              {
+                "label": "Upstream PRs, then pin",
+                "description": "Only send PRs upstream and wait for merges before deploying. Cleanest long-term, but blocks deployment on a single maintainer."
+              }
+            ],
+            "multiSelect": false
+          }
+        ],
+        "answers": {
+          "Where should the patched connector live? I'll need a durable home for ~6-10 patch commits and a pinned version that the service runs from.": "GitHub fork (Recommended)"
+        },
+        "unanswered": [],
+        "status": "answered"
+      },
+      "isError": false
+    },
+    {
+      "arguments": {
+        "questions": [
+          {
+            "question": "How should the new OpenChamber+OmO instance be deployed and exposed on the LAN? Paseo stays up on 6767 until the soak passes either way.",
+            "header": "Instance",
+            "multiSelect": false,
+            "options": [
+              {
+                "label": "New unit on :4096 (Recommended)",
+                "description": "New openchamber-omo.service on 127.0.0.1:4096 with its own data dir (~/.config/openchamber-omo) and UI password; add a 192.168.1.212:4096 portproxy + scheduled task + Domain/Private firewall rule (one UAC click). Old openchamber.service and its data stay untouched."
+              },
+              {
+                "label": "Reuse main OpenChamber",
+                "description": "Point the existing ~/.config/openchamber profile and openchamber.service at the connector. Keeps your OpenChamber settings/projects, but its OpenCode sessions disappear from view and rollback means editing that profile back."
+              },
+              {
+                "label": "Take over 6767 later",
+                "description": "Run on a localhost port during soak, then swap it onto 192.168.1.212:6767 when Paseo is retired. No new Windows rules, but no LAN access until cutover."
+              }
+            ]
+          }
+        ],
+        "waitForAnswer": true
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Instance: Reuse main OpenChamber"
+        }
+      ],
+      "details": {
+        "resolvedBy": "local_ui",
+        "questions": [
+          {
+            "id": "q1",
+            "header": "Instance",
+            "question": "How should the new OpenChamber+OmO instance be deployed and exposed on the LAN? Paseo stays up on 6767 until the soak passes either way.",
+            "options": [
+              {
+                "label": "New unit on :4096 (Recommended)",
+                "description": "New openchamber-omo.service on 127.0.0.1:4096 with its own data dir (~/.config/openchamber-omo) and UI password; add a 192.168.1.212:4096 portproxy + scheduled task + Domain/Private firewall rule (one UAC click). Old openchamber.service and its data stay untouched."
+              },
+              {
+                "label": "Reuse main OpenChamber",
+                "description": "Point the existing ~/.config/openchamber profile and openchamber.service at the connector. Keeps your OpenChamber settings/projects, but its OpenCode sessions disappear from view and rollback means editing that profile back."
+              },
+              {
+                "label": "Take over 6767 later",
+                "description": "Run on a localhost port during soak, then swap it onto 192.168.1.212:6767 when Paseo is retired. No new Windows rules, but no LAN access until cutover."
+              }
+            ],
+            "multiSelect": false
+          }
+        ],
+        "answers": {
+          "How should the new OpenChamber+OmO instance be deployed and exposed on the LAN? Paseo stays up on 6767 until the soak passes either way.": "Reuse main OpenChamber"
+        },
+        "unanswered": [],
+        "status": "answered"
+      },
+      "isError": false
+    },
+    {
+      "arguments": {
+        "questions": [
+          {
+            "question": "OpenCode's revert undoes both the conversation and the file changes since a message. OmO has session-tree branching but no file snapshots. What should revert do?",
+            "header": "Revert",
+            "multiSelect": false,
+            "options": [
+              {
+                "label": "Conversation + files (Recommended)",
+                "description": "Connector snapshots the git working tree before each user turn (dangling `git stash create` commit refs, no branch/stash pollution) and on revert restores files + branches the OmO session back to before that message; unrevert restores the post-turn snapshot. Non-git dirs: conversation-only with a visible notice."
+              },
+              {
+                "label": "Conversation only",
+                "description": "Revert branches the OmO session back to before the message; files are left as they are, with a clear notice in the UI that file changes were not undone."
+              },
+              {
+                "label": "Keep disabled",
+                "description": "Revert/unrevert stay unavailable and return a clear error; use fork instead."
+              }
+            ]
+          }
+        ],
+        "waitForAnswer": true
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Revert: Conversation only"
+        }
+      ],
+      "details": {
+        "resolvedBy": "local_ui",
+        "questions": [
+          {
+            "id": "q1",
+            "header": "Revert",
+            "question": "OpenCode's revert undoes both the conversation and the file changes since a message. OmO has session-tree branching but no file snapshots. What should revert do?",
+            "options": [
+              {
+                "label": "Conversation + files (Recommended)",
+                "description": "Connector snapshots the git working tree before each user turn (dangling `git stash create` commit refs, no branch/stash pollution) and on revert restores files + branches the OmO session back to before that message; unrevert restores the post-turn snapshot. Non-git dirs: conversation-only with a visible notice."
+              },
+              {
+                "label": "Conversation only",
+                "description": "Revert branches the OmO session back to before the message; files are left as they are, with a clear notice in the UI that file changes were not undone."
+              },
+              {
+                "label": "Keep disabled",
+                "description": "Revert/unrevert stay unavailable and return a clear error; use fork instead."
+              }
+            ],
+            "multiSelect": false
+          }
+        ],
+        "answers": {
+          "OpenCode's revert undoes both the conversation and the file changes since a message. OmO has session-tree branching but no file snapshots. What should revert do?": "Conversation only"
+        },
+        "unanswered": [],
+        "status": "answered"
+      },
+      "isError": false
+    }
+  ]
+}

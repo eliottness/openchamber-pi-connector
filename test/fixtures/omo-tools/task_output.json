@@ -1,0 +1,124 @@
+{
+  "tool": "task_output",
+  "samples": [
+    {
+      "arguments": {
+        "task_id": "st_01a1321e",
+        "mode": "status"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "st_01a1321e [running] model GPT-5.6 Terra (variant low)\nlease: held"
+        }
+      ],
+      "details": {
+        "kind": "status",
+        "snapshot": {
+          "task_id": "st_01a1321e",
+          "status": "running",
+          "residency_state": "resident",
+          "execution_mode": "process",
+          "model": "openai/gpt-5.6-terra",
+          "resolved_model": {
+            "provider": "openai",
+            "model_id": "gpt-5.6-terra",
+            "display": "GPT-5.6 Terra",
+            "source": "category",
+            "variant": "low"
+          },
+          "parent_session_id": "01a1176f-4ebb-7128-82ff-d255cccc4e77",
+          "root_session_id": "01a1176f-4ebb-7128-82ff-d255cccc4e77",
+          "age_ms": 11850,
+          "name": "t1-fork-baseline",
+          "description": "Todo 1: fork, clone, pin, baseline connector",
+          "task_summary": "Todo 1: fork+clone openchamber-pi-connector, add node:test runner, pin versions",
+          "category": "quick",
+          "lease": "held"
+        }
+      },
+      "isError": false
+    },
+    {
+      "arguments": {
+        "task_id": "st_01a0c622",
+        "mode": "tail",
+        "tail_lines": 30
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "st_01a0c622 [running] transcript via event-log:\ntool: read\ntool: read\ntool: bash\ntool: read\ntool: read\ntool: read\ntool: read\ntool: read\ntool: read\ntool: read\ntool: read\ntool: read\ntool: read\ntool: read\ntool: read\ntool: read\ntool: read\ntool: grep\ntool: grep\ntool: grep\ntool: bash\ntool: write\ntool: read\ntool: read\ntool: read\ntool: read\ntool: read\ntool: read\ntool: read\ntool: bash"
+        }
+      ],
+      "details": {
+        "kind": "transcript",
+        "mode": "tail",
+        "source": "event-log",
+        "transcript": "tool: read\ntool: read\ntool: bash\ntool: read\ntool: read\ntool: read\ntool: read\ntool: read\ntool: read\ntool: read\ntool: read\ntool: read\ntool: read\ntool: read\ntool: read\ntool: read\ntool: read\ntool: grep\ntool: grep\ntool: grep\ntool: bash\ntool: write\ntool: read\ntool: read\ntool: read\ntool: read\ntool: read\ntool: read\ntool: read\ntool: bash",
+        "truncated": true,
+        "snapshot": {
+          "task_id": "st_01a0c622",
+          "status": "running",
+          "residency_state": "resident",
+          "execution_mode": "in-process",
+          "model": "openai/gpt-6-astra",
+          "resolved_model": {
+            "provider": "openai",
+            "model_id": "gpt-6-astra",
+            "display": "GPT-6 Astra",
+            "source": "category",
+            "variant": "high"
+          },
+          "parent_session_id": "01a0c61b-0afe-7ad2-9b07-54dbf6f4aaf9",
+          "root_session_id": "01a0c61b-0afe-7ad2-9b07-54dbf6f4aaf9",
+          "age_ms": 114668,
+          "name": "scout-cycle-1",
+          "description": "Scout cycle 1 improvement",
+          "task_summary": "Scout: pick the single highest-value VacuumStream improvement for cycle 1",
+          "category": "deep",
+          "child_session_id": "01a0c622-0272-78e7-b9ca-dd0b577f487c"
+        }
+      },
+      "isError": false
+    },
+    {
+      "arguments": {
+        "task_id": "st_01a0c622",
+        "mode": "status"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "st_01a0c622 [running] model GPT-6 Astra (variant high)"
+        }
+      ],
+      "details": {
+        "kind": "status",
+        "snapshot": {
+          "task_id": "st_01a0c622",
+          "status": "running",
+          "residency_state": "resident",
+          "execution_mode": "in-process",
+          "model": "openai/gpt-6-astra",
+          "resolved_model": {
+            "provider": "openai",
+            "model_id": "gpt-6-astra",
+            "display": "GPT-6 Astra",
+            "source": "category",
+            "variant": "high"
+          },
+          "parent_session_id": "01a0c61b-0afe-7ad2-9b07-54dbf6f4aaf9",
+          "root_session_id": "01a0c61b-0afe-7ad2-9b07-54dbf6f4aaf9",
+          "age_ms": 126937,
+          "name": "scout-cycle-1",
+          "description": "Scout cycle 1 improvement",
+          "task_summary": "Scout: pick the single highest-value VacuumStream improvement for cycle 1",
+          "category": "deep",
+          "child_session_id": "01a0c622-0272-78e7-b9ca-dd0b577f487c"
+        }
+      },
+      "isError": false
+    }
+  ]
+}

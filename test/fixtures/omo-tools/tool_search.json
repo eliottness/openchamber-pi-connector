@@ -1,0 +1,55 @@
+{
+  "tool": "tool_search",
+  "samples": [
+    {
+      "arguments": {
+        "query": "monitor file create watch"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Found 1 tool(s) matching \"monitor file create watch\". Nothing was activated; call one by name and it activates on that first call:\n\n- generate_image — Generate or edit an image with OpenAI gpt-image-2.5 (Sunburst by default, the most capable; Flare when speed matters more than quality) and save it as a png,...\n  parameters: {\"type\":\"object\",\"required\":[\"prompt\"],\"properties\":{\"prompt\":{\"type\":\"str…"
+        }
+      ],
+      "details": {
+        "matched": [
+          "generate_image"
+        ],
+        "query": "monitor file create watch"
+      },
+      "isError": false
+    },
+    {
+      "arguments": {
+        "query": "bash execute shell command"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "No catalog tools matched \"bash execute shell command\". Your active tool set is unchanged.\n\nThe query names a tool that is hidden in this session:\n- bash: Run bash inside an eval cell via tool.bash({ command: \"...\" }); hooks and permissions still apply."
+        }
+      ],
+      "details": {
+        "matched": [],
+        "query": "bash execute shell command"
+      },
+      "isError": false
+    },
+    {
+      "arguments": {
+        "query": "monitor background command watch output"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "No catalog tools matched \"monitor background command watch output\". Your active tool set is unchanged. Try different keywords or a broader query."
+        }
+      ],
+      "details": {
+        "matched": [],
+        "query": "monitor background command watch output"
+      },
+      "isError": false
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "tool": "bash_output",
+  "samples": [
+    {
+      "arguments": {
+        "bash_id": "bash_24"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "status: running\n(no new output)"
+        }
+      ],
+      "details": null,
+      "isError": false
+    },
+    {
+      "arguments": {
+        "bash_id": "bash_3",
+        "view": "log"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "status: running\n(no new output)"
+        }
+      ],
+      "details": null,
+      "isError": false
+    },
+    {
+      "arguments": {
+        "bash_id": "bash_23"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "status: running\n(no new output)"
+        }
+      ],
+      "details": null,
+      "isError": false
+    }
+  ]
+}

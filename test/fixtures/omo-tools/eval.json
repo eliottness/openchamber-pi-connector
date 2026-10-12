@@ -1,0 +1,252 @@
+{
+  "tool": "eval",
+  "samples": [
+    {
+      "arguments": {
+        "language": "js",
+        "summary": "senpi tip 목록과 설정 파일 위치를 병렬로 조사",
+        "code": "\nconst results = await parallel([\n  () => tool.bash({ command: \"senpi --list-tips 2>&1 | head -200\" }),\n  () => tool.bash({ command: \"which senpi; readlink -f $(which senpi) 2>/dev/null\" }),\n  () => tool.bash({ command: \"ls -la ~/.senpi ~/.config/senpi ~/.omo 2>&1 | head -60\" }),\n  () => tool.bash({ command: \"find ~ -maxdepth 4 -name 'settings.json' -path '*senpi*' 2>/dev/null; find ~ -maxdepth 4 …"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "===== [\n  {\n    \"id\": \"thinking-level\",\n    \"text\": \"Use shift+tab to cycle the model's thinking level.\"\n  },\n  {\n    \"id\": \"favorite-model-rotation\",\n    \"text\": \"Rotate through favorite models with ctrl+p; go backward with alt+p.\"\n  },\n  {\n    \"id\": \"model-selector-favorites\",\n    \"text\": \"Open the model selector with ctrl+l, then use ctrl+f to toggle the highlighted favorite.\"\n  },\n  {\n    \"id\"…"
+        }
+      ],
+      "details": {
+        "language": "js",
+        "languages": [
+          "js"
+        ],
+        "runtime": {
+          "name": "bun",
+          "version": "1.3.14",
+          "path": "/home/eliott/.bun/bin/bun"
+        },
+        "summary": "senpi tip 목록과 설정 파일 위치를 병렬로 조사",
+        "durationMs": 1301,
+        "wallDurationMs": 1334,
+        "toolCallCount": 4,
+        "toolCalls": [
+          {
+            "name": "bash",
+            "ok": true,
+            "durationMs": 70,
+            "callId": "js-cf543233-6b7c-4a10-a3fb-493902bfcae7",
+            "args": {
+              "command": "which senpi; readlink -f $(which senpi) 2>/dev/null"
+            },
+            "resultPreview": "/home/eliott/.bun/install/global/node_modules/.bin/senpi /home/eliott/.bun/install/global/node_modules/@code-yeongyu/senpi/dist/cli.js"
+          },
+          {
+            "name": "bash",
+            "ok": true,
+            "durationMs": 66,
+            "callId": "js-49ee8634-234b-4d56-8ecb-1aa4b9ecb25d",
+            "args": {
+              "command": "ls -la ~/.senpi ~/.config/senpi ~/.omo 2>&1 | head -60"
+            },
+            "resultPreview": "ls: cannot access '/home/eliott/.config/senpi': No such file or directory /home/eliott/.omo: total 84 drwx------ 13 eliott eliott 4096 Sep 18 23:07 . drwxr-x---…"
+          },
+          {
+            "name": "bash",
+            "ok": true,
+            "durationMs": 657,
+            "callId": "js-ca0f569e-79c4-46a0-915a-3466889b81f0",
+            "args": {
+              "command": "senpi --list-tips 2>&1 | head -200"
+            },
+            "resultPreview": "[ { \"id\": \"thinking-level\", \"text\": \"Use shift+tab to cycle the model's thinking level.\" }, { \"id\": \"favorite-model-rotation\", \"text\": \"Rotate through favorite …"
+          },
+          {
+            "name": "bash",
+            "ok": true,
+            "durationMs": 1267,
+            "callId": "js-b9d6d1c9-8861-4099-a7f8-2cdeb41ffc1f",
+            "args": {
+              "command": "find ~ -maxdepth 4 -name 'settings.json' -path '*senpi*' 2>/dev/null; find ~ -maxdepth 4 -iname '*.json' -path '*senpi*' 2>/dev/null | head -40"
+            },
+            "resultPreview": "(no output)"
+          }
+        ],
+        "truncated": false,
+        "cells": [
+          {
+            "index": 0,
+            "summary": "senpi tip 목록과 설정 파일 위치를 병렬로 조사",
+            "code": "\nconst results = await parallel([\n  () => tool.bash({ command: \"senpi --list-tips 2>&1 | head -200\" }),\n  () => tool.bash({ command: \"which senpi; readlink -f $(which senpi) 2>/dev/null\" }),\n  () => tool.bash({ command: \"ls -la ~/.senpi ~/.config/senpi ~/.omo 2>&1 | head -60\" }),\n  () => tool.bash({ command: \"find ~ -maxdepth 4 -name 'settings.json' -path '*senpi*' 2>/dev/null; find ~ -maxdepth 4 …",
+            "language": "js",
+            "runtime": {
+              "name": "bun",
+              "version": "1.3.14",
+              "path": "/home/eliott/.bun/bin/bun"
+            },
+            "output": "===== [\n  {\n    \"id\": \"thinking-level\",\n    \"text\": \"Use shift+tab to cycle the model's thinking level.\"\n  },\n  {\n    \"id\": \"favorite-model-rotation\",\n    \"text\": \"Rotate through favorite models with ctrl+p; go backward with alt+p.\"\n  },\n  {\n    \"id\": \"model-selector-favorites\",\n    \"text\": \"Open the model selector with ctrl+l, then use ctrl+f to toggle the highlighted favorite.\"\n  },\n  {\n    \"id\"…",
+            "status": "complete",
+            "durationMs": 1301,
+            "startedAt": 1789765621506
+          }
+        ]
+      },
+      "isError": false
+    },
+    {
+      "arguments": {
+        "language": "js",
+        "summary": "전체 tip 목록 JSON과 senpi agent 설정/히스토리 파일 조사",
+        "code": "\nconst results = await parallel([\n  () => tool.bash({ command: \"senpi --list-tips 2>&1 | node -e 'let d=\\\"\\\";process.stdin.on(\\\"data\\\",c=>d+=c).on(\\\"end\\\",()=>{const a=JSON.parse(d);console.log(\\\"COUNT\\\",a.length);a.forEach(t=>console.log(t.id+(t.requiresCommand?\\\" [req:\\\"+t.requiresCommand+\\\"]\\\":\\\"\\\")))})'\" }),\n  () => tool.bash({ command: \"ls -la ~/.senpi/agent; echo '---SETTINGS---'; cat ~/.sen…"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "=====\n COUNT 118\nthinking-level\nfavorite-model-rotation\nmodel-selector-favorites\nmodel-command-search\nmodel-cycling-scope\nthinking-budgets\nprompt-preset\nprovider-login\nfallback-chains-setting\nfallback-command [req:fallback]\nclick-pending-question\nqueue-follow-up\nsteering-message\nedit-queued-message\ninterrupt-restores-queue\nfile-reference\npath-completion\nshortcut-overlay\nprompt-history [req:history…"
+        }
+      ],
+      "details": {
+        "language": "js",
+        "languages": [
+          "js"
+        ],
+        "runtime": {
+          "name": "bun",
+          "version": "1.3.14",
+          "path": "/home/eliott/.bun/bin/bun"
+        },
+        "summary": "전체 tip 목록 JSON과 senpi agent 설정/히스토리 파일 조사",
+        "durationMs": 11270,
+        "wallDurationMs": 11274,
+        "toolCallCount": 4,
+        "toolCalls": [
+          {
+            "name": "bash",
+            "ok": true,
+            "durationMs": 28,
+            "callId": "js-079d9359-687f-42e5-9d39-76221b61cf79",
+            "args": {
+              "command": "ls -la ~/.senpi/agent; echo '---SETTINGS---'; cat ~/.senpi/agent/settings.json 2>/dev/null"
+            },
+            "resultPreview": "total 532 drwxr-xr-x 2 eliott eliott 4096 Sep 17 19:52 . drwxr-xr-x 3 eliott eliott 4096 Sep 17 19:52 .. -rw------- 1 eliott eliott 535540 Sep 18 17:03 senpi-cr…"
+          },
+          {
+            "name": "bash",
+            "ok": true,
+            "durationMs": 25,
+            "callId": "js-6c2cb24c-e214-4e7e-8971-59b80ee36f15",
+            "args": {
+              "command": "ls -la ~/.omo/agent; echo '---'; cat ~/.omo/agent/settings.json 2>/dev/null | head -100"
+            },
+            "resultPreview": "total 160 drwxr-xr-x 8 eliott eliott 4096 Sep 18 23:07 . drwx------ 13 eliott eliott 4096 Sep 18 23:07 .. -rw-r--r-- 1 eliott eliott 18 Sep 17 18:50 .adopted-fr…"
+          },
+          {
+            "name": "bash",
+            "ok": true,
+            "durationMs": 666,
+            "callId": "js-5f5fc10d-e248-421e-8f8c-3f87cf243dcf",
+            "args": {
+              "command": "senpi --list-tips 2>&1 | node -e 'let d=\"\";process.stdin.on(\"data\",c=>d+=c).on(\"end\",()=>{const a=JSON.parse(d);console.log(\"COUNT\",a.length);a.forEach(t=>console.log(t.id+(t.requiresCommand?\" [req:\"+t.requiresCommand+\"]\":\"\")))})'"
+            },
+            "resultPreview": "COUNT 118 thinking-level favorite-model-rotation model-selector-favorites model-command-search model-cycling-scope thinking-budgets prompt-preset provider-login…"
+          },
+          {
+            "name": "bash",
+            "ok": true,
+            "durationMs": 11245,
+            "callId": "js-e025eab5-bf36-42a4-93cb-64fbe17ce6aa",
+            "args": {
+              "command": "grep -rl 'tipsHistory\\|tipsEnabled\\|\"tips\"' ~/.senpi ~/.omo 2>/dev/null | head; echo '---search done'"
+            },
+            "resultPreview": "/home/eliott/.omo/agent/sessions/--home-eliott--/2026-09-18T21-06-43-001Z_01a0b657-ceb9-7a0e-805f-993206dac7ca.jsonl /home/eliott/.omo/agent/settings.json ---se…"
+          }
+        ],
+        "truncated": false,
+        "cells": [
+          {
+            "index": 0,
+            "summary": "전체 tip 목록 JSON과 senpi agent 설정/히스토리 파일 조사",
+            "code": "\nconst results = await parallel([\n  () => tool.bash({ command: \"senpi --list-tips 2>&1 | node -e 'let d=\\\"\\\";process.stdin.on(\\\"data\\\",c=>d+=c).on(\\\"end\\\",()=>{const a=JSON.parse(d);console.log(\\\"COUNT\\\",a.length);a.forEach(t=>console.log(t.id+(t.requiresCommand?\\\" [req:\\\"+t.requiresCommand+\\\"]\\\":\\\"\\\")))})'\" }),\n  () => tool.bash({ command: \"ls -la ~/.senpi/agent; echo '---SETTINGS---'; cat ~/.sen…",
+            "language": "js",
+            "runtime": {
+              "name": "bun",
+              "version": "1.3.14",
+              "path": "/home/eliott/.bun/bin/bun"
+            },
+            "output": "=====\n COUNT 118\nthinking-level\nfavorite-model-rotation\nmodel-selector-favorites\nmodel-command-search\nmodel-cycling-scope\nthinking-budgets\nprompt-preset\nprovider-login\nfallback-chains-setting\nfallback-command [req:fallback]\nclick-pending-question\nqueue-follow-up\nsteering-message\nedit-queued-message\ninterrupt-restores-queue\nfile-reference\npath-completion\nshortcut-overlay\nprompt-history [req:history…",
+            "status": "complete",
+            "durationMs": 11270,
+            "startedAt": 1789765630872
+          }
+        ]
+      },
+      "isError": false
+    },
+    {
+      "arguments": {
+        "language": "js",
+        "summary": "settings.json 전체와 omo.jsonc(architect/memory 설정) 읽기",
+        "code": "\nconst results = await parallel([\n  () => tool.bash({ command: \"cat ~/.omo/agent/settings.json | node -e 'let d=\\\"\\\";process.stdin.on(\\\"data\\\",c=>d+=c).on(\\\"end\\\",()=>{const s=JSON.parse(d);const{tipsHistory,...rest}=s;console.log(JSON.stringify(rest,null,2));console.log(\\\"tipsHistory count:\\\",Object.keys(tipsHistory||{}).length)})'\" }),\n  () => tool.bash({ command: \"cat ~/.omo/omo.jsonc\" }),\n]);\n…"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "=====\n {\n  \"changelogSeen\": {\n    \"omo\": \"5.0.0-beta.68\"\n  },\n  \"theme\": \"dark\",\n  \"defaultProvider\": \"anthropic\",\n  \"defaultModel\": \"claude-opus-4-8\",\n  \"hideThinkingBlock\": false\n}\ntipsHistory count: 118\n=====\n // OMO configuration\n{\n  \"$schema\": \"https://raw.githubusercontent.com/code-yeongyu/oh-my-openagent/dev/assets/omo.schema.json\",\n  \"[opencode]\": {\n    \"team_mode\": {\n      \"enabled\": true…"
+        }
+      ],
+      "details": {
+        "language": "js",
+        "languages": [
+          "js"
+        ],
+        "runtime": {
+          "name": "bun",
+          "version": "1.3.14",
+          "path": "/home/eliott/.bun/bin/bun"
+        },
+        "summary": "settings.json 전체와 omo.jsonc(architect/memory 설정) 읽기",
+        "durationMs": 43,
+        "wallDurationMs": 45,
+        "toolCallCount": 2,
+        "toolCalls": [
+          {
+            "name": "bash",
+            "ok": true,
+            "durationMs": 13,
+            "callId": "js-26bcca80-e487-412f-b1bd-dcb321df443c",
+            "args": {
+              "command": "cat ~/.omo/omo.jsonc"
+            },
+            "resultPreview": "// OMO configuration { \"$schema\": \"https://raw.githubusercontent.com/code-yeongyu/oh-my-openagent/dev/assets/omo.schema.json\", \"[opencode]\": { \"team_mode\": { \"e…"
+          },
+          {
+            "name": "bash",
+            "ok": true,
+            "durationMs": 41,
+            "callId": "js-03ea817e-5661-4728-98cc-64a74162e6a8",
+            "args": {
+              "command": "cat ~/.omo/agent/settings.json | node -e 'let d=\"\";process.stdin.on(\"data\",c=>d+=c).on(\"end\",()=>{const s=JSON.parse(d);const{tipsHistory,...rest}=s;console.log(JSON.stringify(rest,null,2));console.log(\"tipsHistory count:\",Object.keys(tipsHistory||{}).length)})'"
+            },
+            "resultPreview": "{ \"changelogSeen\": { \"omo\": \"5.0.0-beta.68\" }, \"theme\": \"dark\", \"defaultProvider\": \"anthropic\", \"defaultModel\": \"claude-opus-4-8\", \"hideThinkingBlock\": false } …"
+          }
+        ],
+        "truncated": false,
+        "cells": [
+          {
+            "index": 0,
+            "summary": "settings.json 전체와 omo.jsonc(architect/memory 설정) 읽기",
+            "code": "\nconst results = await parallel([\n  () => tool.bash({ command: \"cat ~/.omo/agent/settings.json | node -e 'let d=\\\"\\\";process.stdin.on(\\\"data\\\",c=>d+=c).on(\\\"end\\\",()=>{const s=JSON.parse(d);const{tipsHistory,...rest}=s;console.log(JSON.stringify(rest,null,2));console.log(\\\"tipsHistory count:\\\",Object.keys(tipsHistory||{}).length)})'\" }),\n  () => tool.bash({ command: \"cat ~/.omo/omo.jsonc\" }),\n]);\n…",
+            "language": "js",
+            "runtime": {
+              "name": "bun",
+              "version": "1.3.14",
+              "path": "/home/eliott/.bun/bin/bun"
+            },
+            "output": "=====\n {\n  \"changelogSeen\": {\n    \"omo\": \"5.0.0-beta.68\"\n  },\n  \"theme\": \"dark\",\n  \"defaultProvider\": \"anthropic\",\n  \"defaultModel\": \"claude-opus-4-8\",\n  \"hideThinkingBlock\": false\n}\ntipsHistory count: 118\n=====\n // OMO configuration\n{\n  \"$schema\": \"https://raw.githubusercontent.com/code-yeongyu/oh-my-openagent/dev/assets/omo.schema.json\",\n  \"[opencode]\": {\n    \"team_mode\": {\n      \"enabled\": true…",
+            "status": "complete",
+            "durationMs": 43,
+            "startedAt": 1789765649825
+          }
+        ]
+      },
+      "isError": false
+    }
+  ]
+}

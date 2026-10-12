@@ -1,0 +1,160 @@
+{
+  "entries": [
+    {
+      "customType": "senpi.todo-state",
+      "data": {
+        "schema": "v2",
+        "phases": [
+          {
+            "name": "Investigation",
+            "tasks": [
+              {
+                "content": "Locate paseo install, config, and docs",
+                "status": "in_progress"
+              },
+              {
+                "content": "Determine how paseo connects to OmO",
+                "status": "pending"
+              }
+            ]
+          },
+          {
+            "name": "Configuration",
+            "tasks": [
+              {
+                "content": "Configure paseo to use OmO provider",
+                "status": "pending"
+              },
+              {
+                "content": "Set up daemon autostart on WSL boot",
+                "status": "pending"
+              }
+            ]
+          },
+          {
+            "name": "Verification",
+            "tasks": [
+              {
+                "content": "Verify paseo daemon runs and reaches OmO",
+                "status": "pending"
+              },
+              {
+                "content": "Verify autostart mechanism is enabled",
+                "status": "pending"
+              }
+            ]
+          }
+        ],
+        "ask": {
+          "entryId": "cf2bca9a",
+          "text": "Your goal is to configure paseo to connect to OmO properly and make sure the daemon starts at the start of WSL",
+          "capturedAt": 1791394568081
+        }
+      }
+    },
+    {
+      "customType": "senpi.todo-state",
+      "data": {
+        "schema": "v2",
+        "phases": [
+          {
+            "name": "Investigation",
+            "tasks": [
+              {
+                "content": "Locate paseo install, config, and docs",
+                "status": "completed"
+              },
+              {
+                "content": "Determine how paseo connects to OmO",
+                "status": "completed"
+              }
+            ]
+          },
+          {
+            "name": "Configuration",
+            "tasks": [
+              {
+                "content": "Configure paseo to use OmO provider",
+                "status": "in_progress"
+              },
+              {
+                "content": "Set up daemon autostart on WSL boot",
+                "status": "pending"
+              }
+            ]
+          },
+          {
+            "name": "Verification",
+            "tasks": [
+              {
+                "content": "Verify paseo daemon runs and reaches OmO",
+                "status": "pending"
+              },
+              {
+                "content": "Verify autostart mechanism is enabled",
+                "status": "pending"
+              }
+            ]
+          }
+        ],
+        "ask": {
+          "entryId": "cf2bca9a",
+          "text": "Your goal is to configure paseo to connect to OmO properly and make sure the daemon starts at the start of WSL",
+          "capturedAt": 1791394568081
+        }
+      }
+    },
+    {
+      "customType": "senpi.todo-state",
+      "data": {
+        "schema": "v2",
+        "phases": [
+          {
+            "name": "Investigation",
+            "tasks": [
+              {
+                "content": "Locate paseo install, config, and docs",
+                "status": "completed"
+              },
+              {
+                "content": "Determine how paseo connects to OmO",
+                "status": "completed"
+              }
+            ]
+          },
+          {
+            "name": "Configuration",
+            "tasks": [
+              {
+                "content": "Configure paseo to use OmO provider",
+                "status": "completed"
+              },
+              {
+                "content": "Set up daemon autostart on WSL boot",
+                "status": "completed"
+              }
+            ]
+          },
+          {
+            "name": "Verification",
+            "tasks": [
+              {
+                "content": "Verify paseo daemon runs and reaches OmO",
+                "status": "in_progress"
+              },
+              {
+                "content": "Verify autostart mechanism is enabled",
+                "status": "pending"
+              }
+            ]
+          }
+        ],
+        "ask": {
+          "entryId": "cf2bca9a",
+          "text": "Your goal is to configure paseo to connect to OmO properly and make sure the daemon starts at the start of WSL",
+          "capturedAt": 1791394568081
+        }
+      }
+    }
+  ]
+}

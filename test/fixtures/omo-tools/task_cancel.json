@@ -1,0 +1,24 @@
+{
+  "tool": "task_cancel",
+  "samples": [
+    {
+      "arguments": {
+        "task_id": "st_01a11632",
+        "reason": "Lane committed as aba744be; stop so the final quiet full-suite measurement is not perturbed"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Cancelled st_01a11632 (was running, now cancelled)."
+        }
+      ],
+      "details": {
+        "kind": "cancelled",
+        "task_id": "st_01a11632",
+        "previous_status": "running",
+        "status": "cancelled"
+      },
+      "isError": false
+    }
+  ]
+}

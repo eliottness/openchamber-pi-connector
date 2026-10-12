@@ -1,0 +1,44 @@
+{
+  "tool": "kill_bash",
+  "samples": [
+    {
+      "arguments": {
+        "bash_id": "bash_3"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Killed bash_3."
+        }
+      ],
+      "details": null,
+      "isError": false
+    },
+    {
+      "arguments": {
+        "bash_id": "bash_1"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Killed bash_1."
+        }
+      ],
+      "details": null,
+      "isError": false
+    },
+    {
+      "arguments": {
+        "bash_id": "bash_2"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Killed bash_2."
+        }
+      ],
+      "details": null,
+      "isError": false
+    }
+  ]
+}

@@ -1,0 +1,86 @@
+{
+  "tool": "webfetch",
+  "samples": [
+    {
+      "arguments": {
+        "url": "https://github.com/qingzhu521/openchamber-pi-connector"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "# OpenChamber Pi Connector\n\n[](#openchamber-pi-connector)\n\nUse [OpenChamber](https://github.com/openchamber/openchamber) with the [pi coding agent](https://github.com/badlogic/pi-mono) (`@earendil-works/pi-coding-agent`) instead of OpenCode.\n\n`openchamber-pi` is a local adapter server that speaks the subset of the OpenCode HTTP/SSE API that OpenChamber actually consumes, and drives pi agent sessio…"
+        }
+      ],
+      "details": {
+        "url": "https://github.com/qingzhu521/openchamber-pi-connector",
+        "finalUrl": "https://github.com/qingzhu521/openchamber-pi-connector",
+        "format": "markdown",
+        "status": 200,
+        "statusText": "OK",
+        "contentType": "text/html; charset=utf-8",
+        "bytes": 297481,
+        "timeoutSeconds": 30,
+        "converted": true,
+        "truncated": false,
+        "outputTruncated": false,
+        "outputBytes": 5705,
+        "outputTotalBytes": 5705
+      },
+      "isError": false
+    },
+    {
+      "arguments": {
+        "url": "https://pi.dev/packages/pi-opencode-bridge"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "## pi-opencode-bridge\n\nOpenCode provider for Pi Agent. Auto-discovers models from OpenCode registry and uses Pi's native OpenAI-compatible handler.\n\n[Packages](https://pi.dev/packages)\n\n## Package details\n\nextension\n\nInstall `pi-opencode-bridge` from npm and Pi will load the resources declared by the package manifest.\n\n[npm](https://www.npmjs.com/package/pi-opencode-bridge) [report](https://github…"
+        }
+      ],
+      "details": {
+        "url": "https://pi.dev/packages/pi-opencode-bridge",
+        "finalUrl": "https://pi.dev/packages/pi-opencode-bridge",
+        "format": "markdown",
+        "status": 200,
+        "statusText": "OK",
+        "contentType": "text/html; charset=UTF-8",
+        "bytes": 33709,
+        "timeoutSeconds": 30,
+        "converted": true,
+        "truncated": false,
+        "outputTruncated": false,
+        "outputBytes": 2953,
+        "outputTotalBytes": 2953
+      },
+      "isError": false
+    },
+    {
+      "arguments": {
+        "url": "https://github.com/JudgeZetsumei/open-pi-chamber"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "# ![](https://github.com/JudgeZetsumei/open-pi-chamber/raw/main/docs/references/badges/openchamber-logo-light.svg) OpenChamber\n\n[](#-openchamber)\n\n[![GitHub stars](https://camo.githubusercontent.com/00e4f430ca7b2aa15aab7988d640b363b0c1b10fb773637e168cb846a0abef40/68747470733a2f2f696d672e736869656c64732e696f2f6769746875622f73746172732f627472696170697473796e2f6f70656e6368616d6265723f7374796c653d666c…"
+        }
+      ],
+      "details": {
+        "url": "https://github.com/JudgeZetsumei/open-pi-chamber",
+        "finalUrl": "https://github.com/JudgeZetsumei/open-pi-chamber",
+        "format": "markdown",
+        "status": 200,
+        "statusText": "OK",
+        "contentType": "text/html; charset=utf-8",
+        "bytes": 460794,
+        "timeoutSeconds": 30,
+        "converted": true,
+        "truncated": false,
+        "outputTruncated": false,
+        "outputBytes": 26657,
+        "outputTotalBytes": 26657
+      },
+      "isError": false
+    }
+  ]
+}

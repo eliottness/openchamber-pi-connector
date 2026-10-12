@@ -1,0 +1,25 @@
+{
+  "tool": "get_goal",
+  "samples": [
+    {
+      "arguments": {},
+      "content": [
+        {
+          "type": "text",
+          "text": "{\n  \"goal\": {\n    \"threadId\": \"01a0b04a-7d88-76eb-b6e6-256edb300daa\",\n    \"objective\": \"Execute the frontend-testing improvement plan (docs/testing/frontend-testing-plan.md) — scoped to Phase 1 (enable good assertions) + Phase 3 (deslop) + the TESTING.md contract — and land it as a GitLab merge request on branch better-ui-testing with a green CI pipeline. Phases 2/4/5/6 are deferred follow-ups, do…"
+        }
+      ],
+      "details": {
+        "goal": {
+          "threadId": "01a0b04a-7d88-76eb-b6e6-256edb300daa",
+          "objective": "Execute the frontend-testing improvement plan (docs/testing/frontend-testing-plan.md) — scoped to Phase 1 (enable good assertions) + Phase 3 (deslop) + the TESTING.md contract — and land it as a GitLab merge request on branch better-ui-testing with a green CI pipeline. Phases 2/4/5/6 are deferred follow-ups, documented, not implemented here.\n\nDELIVERABLE (one line): The web + design-system test su…",
+          "status": "active",
+          "timeUsedSeconds": 446,
+          "createdAt": 1789665008,
+          "updatedAt": 1789665453
+        }
+      },
+      "isError": false
+    }
+  ]
+}

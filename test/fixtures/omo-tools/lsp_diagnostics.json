@@ -1,0 +1,145 @@
+{
+  "tool": "lsp_diagnostics",
+  "samples": [
+    {
+      "arguments": {
+        "filePath": "apps/web/vite.config.ts",
+        "severity": "error"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "error[typescript] (2769) at 43:28: No overload matches this call.\n  The last overload gave the following error.\n    Argument of type '() => { root: string; cacheDir: string; resolve: { dedupe: string[]; }; server: { port: number; host: string; }; preview: { port: number; host: string; }; plugins: any[]; ssr: { noExternal: string[]; external: string[]; }; build: { ...; }; }' is not assignable to pa…"
+        }
+      ],
+      "details": {
+        "filePath": "apps/web/vite.config.ts",
+        "severity": "error",
+        "mode": "file",
+        "diagnostics": [
+          {
+            "file": "/home/eliott/git/mellomori/apps/web/vite.config.ts",
+            "diagnostic": {
+              "range": {
+                "start": {
+                  "line": 42,
+                  "character": 28
+                },
+                "end": {
+                  "line": 94,
+                  "character": 2
+                }
+              },
+              "message": "No overload matches this call.\n  The last overload gave the following error.\n    Argument of type '() => { root: string; cacheDir: string; resolve: { dedupe: string[]; }; server: { port: number; host: string; }; preview: { port: number; host: string; }; plugins: any[]; ssr: { noExternal: string[]; external: string[]; }; build: { ...; }; }' is not assignable to parameter of type 'UserConfigExport'.…",
+              "severity": 1,
+              "code": 2769,
+              "source": "typescript",
+              "relatedInformation": [
+                {
+                  "location": {
+                    "uri": "file:///home/eliott/git/mellomori/node_modules/.pnpm/vite%407.3.5_%40types%2Bnode%4022.20.0_jiti%402.4.2_lightningcss%401.32.0_terser%405.48.0_tsx%404.22.4_yaml%402.9.0/node_modules/vite/dist/node/index.d.ts",
+                    "range": {
+                      "start": {
+                        "line": 3105,
+                        "character": 17
+                      },
+                      "end": {
+                        "line": 3105,
+                        "character": 29
+                      }
+                    }
+                  },
+                  "message": "The last overload is declared here."
+                }
+              ]
+            }
+          }
+        ],
+        "totalDiagnostics": 1,
+        "truncated": false
+      },
+      "isError": false
+    },
+    {
+      "arguments": {
+        "filePath": "apps/web/app/root.tsx",
+        "severity": "error"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "No diagnostics found"
+        }
+      ],
+      "details": {
+        "filePath": "apps/web/app/root.tsx",
+        "severity": "error",
+        "mode": "file",
+        "diagnostics": [],
+        "totalDiagnostics": 0,
+        "truncated": false
+      },
+      "isError": false
+    },
+    {
+      "arguments": {
+        "filePath": "/home/eliott/git/mellomori/apps/web/app/components/TripScreen/PlacesView/CollectionCard/CollectionCard.tsx",
+        "severity": "error"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "error[typescript] (2322) at 146:3: Type '{ children: Element; surface: \"paper\"; position: \"relative\"; height: \"100%\"; minWidth: number; hoverStyle: { backgroundColor: \"$backgroundHover\"; } | undefined; focusWithinStyle: { ...; }; ... 7 more ...; ref: (node: unknown) => void; }' is not assignable to type 'IntrinsicAttributes & Omit<RNTamaguiViewNonStyleProps, \"size\" | \"unstyled\" | \"elevation\" | key…"
+        }
+      ],
+      "details": {
+        "filePath": "/home/eliott/git/mellomori/apps/web/app/components/TripScreen/PlacesView/CollectionCard/CollectionCard.tsx",
+        "severity": "error",
+        "mode": "file",
+        "diagnostics": [
+          {
+            "file": "/home/eliott/git/mellomori/apps/web/app/components/TripScreen/PlacesView/CollectionCard/CollectionCard.tsx",
+            "diagnostic": {
+              "range": {
+                "start": {
+                  "line": 145,
+                  "character": 3
+                },
+                "end": {
+                  "line": 145,
+                  "character": 12
+                }
+              },
+              "message": "Type '{ children: Element; surface: \"paper\"; position: \"relative\"; height: \"100%\"; minWidth: number; hoverStyle: { backgroundColor: \"$backgroundHover\"; } | undefined; focusWithinStyle: { ...; }; ... 7 more ...; ref: (node: unknown) => void; }' is not assignable to type 'IntrinsicAttributes & Omit<RNTamaguiViewNonStyleProps, \"size\" | \"unstyled\" | \"elevation\" | keyof StackStyleBase | \"fullscreen\" | …",
+              "severity": 1,
+              "code": 2322,
+              "source": "typescript"
+            }
+          },
+          {
+            "file": "/home/eliott/git/mellomori/apps/web/app/components/TripScreen/PlacesView/CollectionCard/CollectionCard.tsx",
+            "diagnostic": {
+              "range": {
+                "start": {
+                  "line": 222,
+                  "character": 6
+                },
+                "end": {
+                  "line": 222,
+                  "character": 15
+                }
+              },
+              "message": "Type '{ children: (Element | null)[]; position: \"absolute\"; top: number; right: number; bottom: number; left: number; flexDirection: \"row\"; alignItems: \"center\"; justifyContent: \"center\"; gap: \"$sm\"; \"data-testid\": string; opacity: number; pointerEvents: \"none\" | \"box-none\"; animation: string | undefined; }' is not assignable to type 'IntrinsicAttributes & Omit<RNTamaguiViewNonStyleProps, \"elevati…",
+              "severity": 1,
+              "code": 2322,
+              "source": "typescript"
+            }
+          }
+        ],
+        "totalDiagnostics": 2,
+        "truncated": false
+      },
+      "isError": false
+    }
+  ]
+}

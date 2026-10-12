@@ -1,0 +1,55 @@
+{
+  "tool": "read",
+  "samples": [
+    {
+      "arguments": {
+        "path": "/home/eliott/.bun/install/global/node_modules/omo-ai/plugin/skills/ulw-plan/SKILL.md",
+        "offset": null,
+        "limit": null
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "---\nname: ulw-plan\ndescription: \"Explore-first planning consultant that writes one decision-complete work plan before coding. Use only on an explicit user request for the ulw-plan workflow or a plan before implementation; it never self-activates on a bare ulw run.\"\nargument-hint: \"<planning-request>\"\nmetadata:\n  short-description: Explore-first planning consultant that waits for your okay before p…"
+        }
+      ],
+      "details": null,
+      "isError": false
+    },
+    {
+      "arguments": {
+        "path": "/home/eliott/.omo/drafts/openchamber-omo-connector.md",
+        "offset": null,
+        "limit": null
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "---\nslug: openchamber-omo-connector\nstatus: drafting\nintent: clear\nreview_required: true\nplan_path: .omo/plans/openchamber-omo-connector.md\nplan_sha256: null\nreview_round_id: null\nreview_round_limit: 5\npending-action: write and review .omo/plans/openchamber-omo-connector.md\nreview:\n  plan_reviewer:\n    status: pending\n    workspace_root: null\n    runtime_home: null\n    target: .omo/plans/openchamb…"
+        }
+      ],
+      "details": null,
+      "isError": false
+    },
+    {
+      "arguments": {
+        "path": "/tmp/oc-eval/pi-connector/docs/api-surface.md",
+        "offset": 11,
+        "limit": 100
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "## REST/SDK methods used\n\n### Sessions (core)\n\n| SDK method | Purpose in OpenChamber | pi counterpart |\n|---|---|---|\n| `session.list` | session list per directory | scan pi `--session-dir` JSONL files |\n| `session.create` | new session | spawn `pi --mode rpc` (fresh session) |\n| `session.get` | session detail | RPC `get_state` |\n| `session.update` | rename/archive/metadata | adapter-side title + …"
+        },
+        {
+          "type": "text",
+          "text": "[24 more lines in file. Use offset=111 to continue.]",
+          "audience": "model"
+        }
+      ],
+      "details": null,
+      "isError": false
+    }
+  ]
+}

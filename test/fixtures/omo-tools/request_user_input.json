@@ -1,0 +1,43 @@
+{
+  "tool": "request_user_input",
+  "samples": [
+    {
+      "arguments": {
+        "questions": [
+          {
+            "id": "stopped_fans",
+            "header": "Which fans?",
+            "question": "Where are the two stopped fans physically located?",
+            "options": [
+              {
+                "label": "CPU cooler",
+                "description": "They are attached to the CPU heatsink or its liquid-cooling radiator."
+              },
+              {
+                "label": "Case",
+                "description": "They are mounted on the case front, top, rear, or bottom."
+              },
+              {
+                "label": "Graphics card",
+                "description": "They are attached directly to the graphics card."
+              }
+            ]
+          }
+        ],
+        "wait_for_answer": false
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Question accepted; the answer will arrive as a user message."
+        }
+      ],
+      "details": {
+        "accepted": true,
+        "requestId": "call_HZ5eNRu5p8LAcHmPOd9zHg17|fc_087cfaf57f135be0016ac6aabd05a087d284638a3397db8457",
+        "status": "pending"
+      },
+      "isError": false
+    }
+  ]
+}

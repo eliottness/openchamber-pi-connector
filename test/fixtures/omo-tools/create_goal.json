@@ -1,0 +1,71 @@
+{
+  "tool": "create_goal",
+  "samples": [
+    {
+      "arguments": {
+        "objective": "Execute plan /home/eliott/.omo/plans/openchamber-omo-connector.md (ulw-execute, direct delivery, no PR mode). End state: fork eliottness/openchamber-pi-connector at ~/git/openchamber-pi-connector branch omo drives OmO (omo --mode rpc) behind the main OpenChamber 1.24.2 service on 127.0.0.1:4096 and LAN 192.168.1.212:4096; all OmO sessions listed; tool calls mapped to native cards (todo panel, suba…"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "{\n  \"goal\": {\n    \"threadId\": \"01a1176f-4ebb-7128-82ff-d255cccc4e77\",\n    \"objective\": \"Execute plan /home/eliott/.omo/plans/openchamber-omo-connector.md (ulw-execute, direct delivery, no PR mode). End state: fork eliottness/openchamber-pi-connector at ~/git/openchamber-pi-connector branch omo drives OmO (omo --mode rpc) behind the main OpenChamber 1.24.2 service on 127.0.0.1:4096 and LAN 192.168.…"
+        }
+      ],
+      "details": {
+        "goal": {
+          "threadId": "01a1176f-4ebb-7128-82ff-d255cccc4e77",
+          "objective": "Execute plan /home/eliott/.omo/plans/openchamber-omo-connector.md (ulw-execute, direct delivery, no PR mode). End state: fork eliottness/openchamber-pi-connector at ~/git/openchamber-pi-connector branch omo drives OmO (omo --mode rpc) behind the main OpenChamber 1.24.2 service on 127.0.0.1:4096 and LAN 192.168.1.212:4096; all OmO sessions listed; tool calls mapped to native cards (todo panel, suba…",
+          "status": "active",
+          "timeUsedSeconds": 0,
+          "createdAt": 1791842203,
+          "updatedAt": 1791842203
+        }
+      },
+      "isError": false
+    },
+    {
+      "arguments": {
+        "objective": "Change the search-result click map panning so the selected pin ends up centered on screen (currently it does a minimum-visibility pan). Scope the change to the search-result coordinate-focus case only. Then: run affected tests + diagnostics, commit and push, open/identify the MR, review it with subagents, fix the findings, commit and push fixes, and merge the MR. Follow repo AGENTS.md/CONTRIBUTING…"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "{\n  \"goal\": {\n    \"threadId\": \"01a0b4e1-99ca-7531-8a1b-5de0a2dc5195\",\n    \"objective\": \"Change the search-result click map panning so the selected pin ends up centered on screen (currently it does a minimum-visibility pan). Scope the change to the search-result coordinate-focus case only. Then: run affected tests + diagnostics, commit and push, open/identify the MR, review it with subagents, fix t…"
+        }
+      ],
+      "details": {
+        "goal": {
+          "threadId": "01a0b4e1-99ca-7531-8a1b-5de0a2dc5195",
+          "objective": "Change the search-result click map panning so the selected pin ends up centered on screen (currently it does a minimum-visibility pan). Scope the change to the search-result coordinate-focus case only. Then: run affected tests + diagnostics, commit and push, open/identify the MR, review it with subagents, fix the findings, commit and push fixes, and merge the MR. Follow repo AGENTS.md/CONTRIBUTING…",
+          "status": "active",
+          "timeUsedSeconds": 0,
+          "createdAt": 1789741250,
+          "updatedAt": 1789741250
+        }
+      },
+      "isError": false
+    },
+    {
+      "arguments": {
+        "objective": "Execute the frontend-testing improvement plan (docs/testing/frontend-testing-plan.md) — scoped to Phase 1 (enable good assertions) + Phase 3 (deslop) + the TESTING.md contract — and land it as a GitLab merge request on branch better-ui-testing with a green CI pipeline. Phases 2/4/5/6 are deferred follow-ups, documented, not implemented here.\n\nDELIVERABLE (one line): The web + design-system test su…"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "{\n  \"goal\": {\n    \"threadId\": \"01a0b04a-7d88-76eb-b6e6-256edb300daa\",\n    \"objective\": \"Execute the frontend-testing improvement plan (docs/testing/frontend-testing-plan.md) — scoped to Phase 1 (enable good assertions) + Phase 3 (deslop) + the TESTING.md contract — and land it as a GitLab merge request on branch better-ui-testing with a green CI pipeline. Phases 2/4/5/6 are deferred follow-ups, do…"
+        }
+      ],
+      "details": {
+        "goal": {
+          "threadId": "01a0b04a-7d88-76eb-b6e6-256edb300daa",
+          "objective": "Execute the frontend-testing improvement plan (docs/testing/frontend-testing-plan.md) — scoped to Phase 1 (enable good assertions) + Phase 3 (deslop) + the TESTING.md contract — and land it as a GitLab merge request on branch better-ui-testing with a green CI pipeline. Phases 2/4/5/6 are deferred follow-ups, documented, not implemented here.\n\nDELIVERABLE (one line): The web + design-system test su…",
+          "status": "active",
+          "timeUsedSeconds": 0,
+          "createdAt": 1789665008,
+          "updatedAt": 1789665008
+        }
+      },
+      "isError": false
+    }
+  ]
+}

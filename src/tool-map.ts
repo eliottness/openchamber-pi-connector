@@ -79,8 +79,9 @@ export function resultText(content: unknown): string {
     .map((block) => block.text).join("");
 }
 
-/** OpenChamber renders edit hunks from metadata.patch/diff, not success prose. */
-export function resultMetadata(result: ToolResult): Record<string, unknown> {
+/** Only edit cards need patch metadata; write cards already preview input.content. */
+export function resultMetadata(tool: string, result: ToolResult): Record<string, unknown> {
+  if (tool !== "edit" && tool !== "multiedit") return {};
   const details = record(result.details) ? result.details : {};
   return {
     ...(typeof details.patch === "string" ? { patch: details.patch } : {}),
@@ -93,7 +94,7 @@ export function mapTool(omoName: string, args: unknown, result?: ToolResult): Ma
   const handler = Object.hasOwn(toolMappers, omoName) ? toolMappers[omoName] : undefined;
   const mapped = handler !== undefined ? handler(input, result) : generic(omoName, input);
   if (result === undefined) return mapped;
-  const metadata = { ...mapped.metadata, ...resultMetadata(result) };
+  const metadata = { ...mapped.metadata, ...resultMetadata(mapped.tool, result) };
   return {
     ...mapped, output: resultText(result.content),
     ...(Object.keys(metadata).length > 0 ? { metadata } : {}),

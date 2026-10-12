@@ -58,6 +58,20 @@ test("single and multiple edits carry renderer strings and file metadata", () =>
   });
 });
 
+test("write completion emits content-only metadata even when the result contains diffs", () => {
+  const mapped = mapTool("write", { path: "out.txt", content: "initial" }, {
+    content: [{ type: "text", text: "Successfully wrote to out.txt" }],
+    details: {
+      patch: "--- out.txt\n+++ out.txt\n@@ -1 +1 @@\n-updated\n+initial\n",
+      diff: "-updated\n+initial",
+      filediff: { file: "out.txt", before: "updated", after: "initial" },
+    },
+  });
+  assert.deepEqual(mapped.input, { filePath: "out.txt", content: "initial" });
+  assert.equal(mapped.metadata, undefined);
+  assert.equal(mapped.output, "Successfully wrote to out.txt");
+});
+
 test("bash and questions use native renderer contracts", () => {
   assert.deepEqual(mapTool("bash", { command: "pwd", description: "Working directory" }).input,
     { command: "pwd", description: "Working directory" });
@@ -104,6 +118,7 @@ function session(piPath: string): ManagedSession {
     info: { id: "ses_test", projectID: "/tmp/test", directory: "/tmp/test", title: "Tools", version: "test", time: { created: 0, updated: 0 } },
     pi: undefined, messages: [], status: { type: "idle" }, model: undefined, streaming: undefined,
     toolByCallId: new Map(), piPath,
+    hasPendingInteraction: () => false, hasRunningChildren: () => false,
   };
 }
 
@@ -143,6 +158,10 @@ test(`real RPC ${executionEvents ? "execution" : "turn_end-only"} events and JSO
   assert.ok(liveParts.some((part) => part.tool === "read"));
   assert.ok(liveParts.some((part) => part.tool === "write"));
   assert.ok(liveParts.some((part) => part.tool === "edit"));
+  for (const part of [...liveParts, ...historyParts].filter((part) => part.tool === "write")) {
+    assert.ok(part.state.status === "completed");
+    assert.deepEqual(part.state.metadata, {});
+  }
 });
 }
 

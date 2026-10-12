@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   ApprovalBridge,
@@ -46,13 +45,14 @@ test("parses permission title Path File and Tool variants", () => {
   });
 });
 
-test("classifies fixture permission request without auto-cancelling", () => {
-  const line = readFileSync(new URL("./fixtures/omo-rpc/run1.jsonl", import.meta.url), "utf8")
-    .split("\n")
-    .filter((line) => line !== "")
-    .map((line) => JSON.parse(line) as Record<string, unknown>)
-    .find((entry) => entry.type === "extension_ui_request" && entry.method === "select" && String(entry.title).startsWith("Permission required:"));
-  assert.ok(line);
+test("classifies permission request without auto-cancelling", () => {
+  const line = {
+    id: "permission-read",
+    method: "select",
+    title: "Permission required: read\n\nPath: /tmp/work/seed.txt\n\nPatterns:\n  - /tmp/work/seed.txt",
+    options: ["Allow once", "Allow always", "Deny", "Deny with feedback"],
+    toolCallId: "call-read",
+  };
   const h = harness();
   h.bridge.handle(request(line));
   assert.equal(h.responses.length, 0);
@@ -60,7 +60,7 @@ test("classifies fixture permission request without auto-cancelling", () => {
     id: line.id,
     sessionID: "ses_test",
     permission: "read",
-    patterns: ["/tmp/ocomo-qa/t4/work/seed.txt"],
+    patterns: ["/tmp/work/seed.txt"],
     metadata: { title: line.title },
     always: [],
     tool: { messageID: "msg_test", callID: line.toolCallId },

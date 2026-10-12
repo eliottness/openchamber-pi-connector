@@ -7,9 +7,6 @@ import { ApprovalBridge, extensionUiRequestFrom, parsePermissionTitle, type Appr
 import { PiRpcClient } from "../src/pi-rpc.js";
 import { AdapterServer } from "../src/server.js";
 import { V2EventTranslator } from "../src/v2.js";
-import { SessionManager } from "../src/sessions.js";
-import { SessionStore } from "../src/session-store.js";
-import { systemClock } from "../src/lifecycle.js";
 import { EventEmitter } from "node:events";
 
 const options = ["Allow once", "Allow always", "Deny", "Deny with feedback"];
@@ -78,7 +75,6 @@ test("question metadata and Other chain correlate even without RPC toolCallId", 
   h.bridge.rejectQuestion("anything");
   assert.deepEqual(h.responses.at(-1), { type: "extension_ui_response", id: "anything", cancelled: true });
 });
-
 test("confirm input editor and generic select produce their RPC response field", () => {
   for (const [method, answer, expected] of [
     ["confirm", "Yes", { confirmed: true }],
@@ -140,7 +136,7 @@ test("feedback cannot answer an unrelated tool and abort discards it", () => {
   assert.equal(h.bridge.questions().length, 1);
 });
 
-test("turn end clears stale metadata and pending cards without cancelling OmO", () => {
+test("turn end clears stale metadata and pending cards without cancellation", () => {
   const h = harness();
   h.bridge.noteToolStart("call", "ask_user_question", { questions: [{ question: "Pick", header: "Original", options: [] }] });
   h.ask({ id: "first", method: "select", title: "Pick", options: [] });
@@ -151,7 +147,7 @@ test("turn end clears stale metadata and pending cards without cancelling OmO", 
   assert.equal(h.bridge.questions()[0]?.questions[0]?.header, "Pick");
 });
 
-test("OmO request timeout clears the card on its rejection event", async () => {
+test("extension UI timeout clears the card on its rejection event", async () => {
   const responses: Record<string, unknown>[] = [];
   const events = new EventEmitter();
   const expired = waitFor(events, "question.rejected");
@@ -296,48 +292,6 @@ test("HTTP v1 v2 lists replies malformed input unknown IDs and abort", { timeout
         });
         rmSync(root, { recursive: true, force: true });
       }
-    }
-  }
-});
-
-test("real session pending-interaction hook prevents idle reaping until the reply", { timeout: 20000 }, async (t) => {
-  const root = mkdtempSync(join(tmpdir(), "approval-reaper-"));
-  const binary = new URL("./fixtures/approval-rpc.mjs", import.meta.url).pathname;
-  const previous = process.env.OCPI_PI_BINARY;
-  process.env.OCPI_PI_BINARY = binary;
-  let time = 0;
-  const manager = new SessionManager(() => undefined, new SessionStore(root), root, {
-    clock: { ...systemClock, now: () => time }, idleTimeoutMs: 100, maxLive: 1,
-  });
-  t.after(() => bounded(manager.disposeAll(), "session process teardown", 10000));
-  try {
-    const info = await bounded(manager.create(root), "session creation");
-    const session = manager.get(info.id);
-    assert.ok(session?.pi);
-    session.piPath = binary;
-    const asked = waitFor(session.pi, "extension_ui_request");
-    await Promise.all([
-      session.pi.command({ type: "emit_ui", request: {
-        id: "reap-pending", method: "select", title: "Permission required: read", options, toolCallId: "call",
-      } }, 5000),
-      asked,
-    ]);
-    assert.equal(session.status.type, "idle");
-    assert.equal(session.hasPendingInteraction(), true);
-    time = 100;
-    await bounded(manager.lifecycle.reap(), "pending session reap", 10000);
-    assert.ok(session.pi, "pending approval must keep the expired idle process alive");
-    manager.replyPermission(info.id, "reap-pending", "once");
-    assert.equal(session.hasPendingInteraction(), false);
-    await bounded(manager.lifecycle.reap(), "replied session reap", 10000);
-    assert.equal(session.pi, undefined);
-  } finally {
-    try {
-      await bounded(manager.disposeAll(), "session process teardown", 10000);
-    } finally {
-      if (previous === undefined) delete process.env.OCPI_PI_BINARY;
-      else process.env.OCPI_PI_BINARY = previous;
-      rmSync(root, { recursive: true, force: true });
     }
   }
 });

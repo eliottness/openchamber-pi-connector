@@ -12,6 +12,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
+import { systemClock, type LifecycleClock } from "./lifecycle.js";
 
 export interface PiRpcCommand {
   id?: string;
@@ -34,6 +35,7 @@ export interface PiRpcClientOptions {
   piBinary?: string;
   /** Extra CLI flags, e.g. ["--no-session"] or ["--provider", "x"]. */
   args?: string[];
+  clock?: LifecycleClock;
 }
 
 interface PendingRequest {
@@ -48,6 +50,15 @@ export class PiRpcClient extends EventEmitter {
   private pending = new Map<string, PendingRequest>();
   private closed = false;
   private stderrTail = "";
+  private disposing: Promise<void> | undefined;
+
+  get pid(): number | undefined {
+    return this.proc.pid;
+  }
+
+  get isBusy(): boolean {
+    return this.pending.size > 0;
+  }
 
   onEvent(listener: (payload: Record<string, unknown>) => void): this {
     return super.on("event", listener);
@@ -64,6 +75,7 @@ export class PiRpcClient extends EventEmitter {
       cwd: options.cwd,
       stdio: ["pipe", "pipe", "pipe"],
       env: process.env,
+      detached: true,
     });
 
     this.proc.stderr!.on("data", (chunk: Buffer) => {
@@ -79,7 +91,10 @@ export class PiRpcClient extends EventEmitter {
       this.drain();
       this.failAll(new Error("pi process closed stdout"));
     });
-    this.proc.on("error", (err) => this.failAll(err));
+    this.proc.on("error", (err) => {
+      this.closed = true;
+      this.failAll(err);
+    });
     this.proc.on("exit", (code, signal) => {
       this.closed = true;
       console.error(
@@ -185,27 +200,43 @@ export class PiRpcClient extends EventEmitter {
   }
 
   async dispose(): Promise<void> {
-    if (this.closed) return;
+    if (this.disposing !== undefined) return this.disposing;
     this.closed = true;
-    try {
-      this.proc.stdin!.end();
-    } catch {
-      /* already closed */
-    }
-    // Give pi a moment to shut down on stdin EOF, then escalate.
-    await new Promise<void>((resolve) => {
-      const t = setTimeout(() => {
-        try {
-          this.proc.kill("SIGTERM");
-        } catch {
-          /* noop */
-        }
+    this.failAll(new Error("pi process disposed"));
+    const pid = this.proc.pid;
+    if (pid === undefined) return;
+    const clock = this.options.clock ?? systemClock;
+    const signalGroup = (signal: NodeJS.Signals | 0): boolean => {
+      try {
+        process.kill(-pid, signal);
+        return true;
+      } catch (error) {
+        if (error instanceof Error && "code" in error && error.code === "ESRCH") return false;
+        throw error;
+      }
+    };
+    this.disposing = new Promise<void>((resolve) => {
+      let exited = this.proc.exitCode !== null || this.proc.signalCode !== null;
+      const finish = (): void => {
+        clock.clearTimeout(timer);
+        this.proc.off("exit", onExit);
         resolve();
-      }, 2_000);
-      this.proc.once("exit", () => {
-        clearTimeout(t);
-        resolve();
-      });
+      };
+      const onExit = (): void => {
+        exited = true;
+        // A grandchild may outlive pi. Keep the escalation armed for its group.
+        if (!signalGroup(0)) finish();
+      };
+      this.proc.once("exit", onExit);
+      const timer = clock.setTimeout(() => {
+        signalGroup("SIGKILL");
+        if (exited) finish();
+        else this.proc.once("exit", finish);
+      }, 5_000);
+      const alive = signalGroup("SIGTERM");
+      this.proc.stdin?.end();
+      if (!alive && exited) finish();
     });
+    return this.disposing;
   }
 }

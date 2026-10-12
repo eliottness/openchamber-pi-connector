@@ -4,7 +4,7 @@
 
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
 import { randomUUID } from "node:crypto";
-import { appendFileSync } from "node:fs";
+import { debugLog, miscRoute } from "./misc-routes.js";
 import { execFile } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { SessionManager } from "./sessions.js";
@@ -21,8 +21,6 @@ import {
   type V2Session,
 } from "./v2.js";
 import type { OCEvent, OCModelRef, OCPromptBody, OCSession } from "./types.js";
-
-const DEBUG_LOG = process.env.OCPI_DEBUG_LOG ?? "/tmp/openchamber-pi-debug.log";
 
 // This connector is not opencode — it only implements an OpenCode API subset.
 // OpenChamber reads /global/health's `version` as the installed opencode version
@@ -41,10 +39,6 @@ function applyArchivedFilter(sessions: OCSession[], archived: string | null) {
   if (archived === "true") return sessions.filter((s) => s.time.archived !== undefined);
   if (archived === "false") return sessions.filter((s) => s.time.archived === undefined);
   return sessions;
-}
-
-function debugLog(line: string): void {
-  if (process.env.OCPI_DEBUG) appendFileSync(DEBUG_LOG, line + "\n");
 }
 
 function numberParam(value: string | null): number | undefined {
@@ -162,7 +156,7 @@ export class AdapterServer {
   private async route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     debugLog(`[http] ${req.method} ${req.url}`);
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-opencode-directory");
     if (req.method === "OPTIONS") {
       res.writeHead(204).end();
@@ -223,6 +217,11 @@ export class AdapterServer {
     }
 
     // --- sessions ---
+    const misc = await miscRoute(method, path, url, directory);
+    if (misc !== undefined) {
+      this.json(res, misc.status, misc.body);
+      return;
+    }
     if (path === "/session" && method === "POST") {
       const body = (await this.body(req)) as { parentID?: string; title?: string };
       this.json(res, 200, await this.sessions.create(directory, body.title, body.parentID));
@@ -248,6 +247,9 @@ export class AdapterServer {
         return;
       }
       switch (`${method} ${sub ?? ""}`) {
+        case "GET /diff":
+          this.json(res, 200, await this.sessions.diff(sessionId!));
+          return;
         case "GET ":
           this.json(res, 200, this.sessions.get(sessionId!)!.info);
           return;
@@ -348,9 +350,8 @@ export class AdapterServer {
       // OpenChamber page-loads the sidebar through this route (not /session) with
       // ?directory=…&archived=…&roots=…&limit=…. Honor directory/roots/archived:
       // ignoring them left the sidebar with only live sessions, so restored
-      // history never appeared after a restart; ignoring `archived` broke the
-      // archive tab (it must show only time.archived sessions, while the normal
-      // sidebar's archived=false must exclude them).
+      // history never appeared after a restart. archived=false excludes archived
+      // sessions; archived=true includes them so the UI can partition both lists.
       const directoryParam =
         url.searchParams.get("directory") ?? (req.headers["x-opencode-directory"] as string | undefined);
       const rootsOnly = url.searchParams.get("roots") === "true";
@@ -359,7 +360,12 @@ export class AdapterServer {
           ? this.sessions.list(directoryParam)
           : this.sessions.listAll();
       if (rootsOnly) sessions = sessions.filter((s) => s.parentID === undefined);
-      sessions = applyArchivedFilter(sessions, url.searchParams.get("archived"));
+      // Experimental lists use archived=true to INCLUDE archived sessions.
+      // The UI partitions this result itself; filtering to archived-only drops
+      // the current live session from the header's global metadata store.
+      if (url.searchParams.get("archived") === "false") {
+        sessions = sessions.filter((s) => s.time.archived === undefined);
+      }
       this.json(res, 200, sessions);
       return;
     }
@@ -852,6 +858,8 @@ export class AdapterServer {
           return;
         }
         case "GET /diff":
+          this.json(res, 200, { data: await this.sessions.diff(sessionId) });
+          return;
         case "GET /context": {
           this.json(res, 501, { name: "NotImplemented", data: { message: `${method} ${path} is not implemented by this connector` } });
           return;

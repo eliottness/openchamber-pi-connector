@@ -4,7 +4,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { PiRpcClient } from "./pi-rpc.js";
 import { SessionLifecycle, type LifecycleOptions } from "./lifecycle.js";
@@ -14,6 +14,8 @@ import { mapTool, resultMetadata, resultText } from "./tool-map.js";
 import { TodoBridge, type Todo, type TodoUpdated } from "./todo-bridge.js";
 import { bindMessageEntries, forkConversation, getEntries, navigate, recordTurn, revertConversation, revertNotice, SessionTreeError, unrevertConversation, type SessionTreeState } from "./session-tree.js";
 import { SubagentBridge, taskParts, updateTaskParts, taskCompletions } from "./subagents.js";
+import { sessionDiff, touchedFiles } from "./session-diff.js";
+import { debugLog } from "./misc-routes.js";
 import { ocIdFor, piSessionDir, piSessionsRootMtime, scanAllPiSessions, scanPiSessions, SessionStore, type ScannedSession } from "./session-store.js";
 import type {
   OCAssistantMessage,
@@ -100,6 +102,8 @@ export class SessionManager {
   private disposed = false;
   private operations = new Map<string, Promise<unknown>>();
   private sessions = new Map<string, ManagedSession>();
+  private dirtyDiffs = new Set<string>();
+  private diffEmissions = new Map<string, Promise<void>>();
   private readonly store: SessionStore;
   readonly lifecycle: SessionLifecycle;
   readonly subagents: SubagentBridge;
@@ -144,7 +148,7 @@ export class SessionManager {
       id: piSessionId !== undefined ? ocIdFor(piSessionId) : id("ses"),
       projectID: directory,
       directory,
-      title: title ?? "New session",
+      title: title?.trim() || "New session",
       version: ADAPTER_VERSION,
       time: { created: now, updated: now },
       ...(parentID !== undefined ? { parentID } : {}),
@@ -432,6 +436,27 @@ export class SessionManager {
     return s.todoBridge?.todos ?? [];
   }
 
+  async diff(sessionId: string) {
+    const s = this.get(sessionId);
+    if (s === undefined) throw new Error(`unknown session: ${sessionId}`);
+    return sessionDiff(s.info.directory, this.ensureMessages(s));
+  }
+
+  private emitDiff(s: ManagedSession): void {
+    if (!this.dirtyDiffs.delete(s.info.id)) return;
+    const previous = this.diffEmissions.get(s.info.id) ?? Promise.resolve();
+    const pending = previous.then(async () => {
+      const diff = await this.diff(s.info.id);
+      this.emit(s.info.directory, { type: "session.diff", properties: { sessionID: s.info.id, diff } });
+    }).catch((error: unknown) => {
+      this.emit(s.info.directory, { type: "session.error", properties: { sessionID: s.info.id,
+        error: { name: "UnknownError", data: { message: error instanceof Error ? error.message : String(error) } } } });
+    }).finally(() => {
+      if (this.diffEmissions.get(s.info.id) === pending) this.diffEmissions.delete(s.info.id);
+    });
+    this.diffEmissions.set(s.info.id, pending);
+  }
+
   async abort(sessionId: string): Promise<boolean> {
     const s = this.get(sessionId);
     if (!s) return false;
@@ -602,9 +627,10 @@ export class SessionManager {
     s.messages?.push({ info: userMsg, parts });
     s.info.time.updated = Date.now();
     if (s.info.title === "New session") {
-      s.info.title = text.slice(0, 60);
-      this.emit(s.info.directory, { type: "session.updated", properties: { info: s.info } });
+      s.info.title = text.trim().replace(/\s+/g, " ").slice(0, 60) || "New session";
     }
+    this.persistMeta(s);
+    this.emit(s.info.directory, { type: "session.updated", properties: { info: s.info } });
     this.emit(s.info.directory, { type: "message.updated", properties: { info: userMsg } });
     // Echo the user text part: the reducer replaces the client's sessionID-less
     // optimistic part (same type, new id) in place — without this echo a page
@@ -650,6 +676,7 @@ export class SessionManager {
     await this.lifecycle.stop();
     this.disposed = true;
     this.subagents.dispose();
+    await Promise.all(this.diffEmissions.values());
     this.sessions.clear();
   }
 
@@ -849,8 +876,7 @@ export class SessionManager {
     const dir = s.info.directory;
     if (process.env.OCPI_DEBUG) {
       const ame = (ev.assistantMessageEvent as { type?: string } | undefined)?.type;
-      const target = process.env.OCPI_DEBUG_LOG ?? "/tmp/openchamber-pi-debug.log";
-      appendFileSync(target, `[pi-event] ${String(ev.type)}${ame ? `/${ame}` : ""} ${JSON.stringify(ev).slice(0, 300)}\n`);
+      debugLog(`[pi-event] ${String(ev.type)}${ame ? `/${ame}` : ""} ${JSON.stringify(ev).slice(0, 300)}`);
     }
     switch (ev.type) {
       case "entry_appended": {
@@ -869,6 +895,10 @@ export class SessionManager {
         this.finalizeDanglingTools(s);
         this.subagents.finishCalls(s.info.id);
         this.finishStreaming(s);
+        this.emitDiff(s);
+        s.info.time.updated = Date.now();
+        this.persistMeta(s);
+        this.emit(dir, { type: "session.updated", properties: { info: s.info } });
         this.setStatus(s, { type: "idle" });
         this.emit(dir, { type: "session.idle", properties: { sessionID: s.info.id } });
         if (s.piPath !== undefined) this.store.update(s.info.id, { updated: Date.now() });
@@ -882,6 +912,7 @@ export class SessionManager {
         // pi delivers tool results here, matched back to parts by toolCallId.
         const results = ev.toolResults as Array<Record<string, unknown>> | undefined;
         if (Array.isArray(results)) this.applyToolResults(s, results);
+        this.emitDiff(s);
         break;
       }
 
@@ -1162,6 +1193,7 @@ export class SessionManager {
           time: { start: startedAt, end: Date.now() },
         };
       }
+      if (touchedFiles([part]).length > 0) this.dirtyDiffs.add(s.info.id);
       this.emitPart(s, part);
       const owner = s.messages?.find((m) => m.info.id === part.messageID);
       if (owner) this.emit(s.info.directory, { type: "message.updated", properties: { info: owner.info } });

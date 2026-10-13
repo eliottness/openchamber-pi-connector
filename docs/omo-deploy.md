@@ -2,14 +2,22 @@
 
 ## Current deployment
 
-- Connector tag: `omo-v1`, commit `4610c29`.
-- Deployment worktree: `/home/eliott/.local/share/openchamber-omo/connector`.
+- Connector tag: `omo-v6`, commit `3292897`.
+- Deployment worktree: `/home/eliott/.local/share/openchamber-omo/connector-v6`.
+- Retained rollback worktrees:
+  - `/home/eliott/.local/share/openchamber-omo/connector` (`omo-v1`)
+  - `/home/eliott/.local/share/openchamber-omo/connector-v3` (`omo-v3`)
+  - `/home/eliott/.local/share/openchamber-omo/connector-v4` (`omo-v4`)
+  - `/home/eliott/.local/share/openchamber-omo/connector-v5` (`omo-v5`)
 - Settings file: `~/.config/openchamber/settings.json`.
+- Retained settings backups: `settings.json.pre-omo`, `settings.json.pre-v3`,
+  `settings.json.pre-v4`, `settings.json.pre-v5`, and `settings.json.pre-v6`.
+  The pre-v6 backup points to the v5 backend.
 - Backend setting:
 
   ```json
   {
-    "opencodeBinary": "/home/eliott/.local/share/openchamber-omo/connector/bin/opencode-pi"
+    "opencodeBinary": "/home/eliott/.local/share/openchamber-omo/connector-v6/bin/opencode-pi"
   }
   ```
 
@@ -93,9 +101,11 @@ a separate versioned worktree. Run the OmO smoke before changing
 `opencodeBinary`; it requires `OCPI_PI_BINARY` to name the OmO executable.
 
 ```bash
-tag=omo-v2
+set -euo pipefail
+tag=omo-v7
+version="${tag#omo-}"
 repo="$HOME/git/openchamber-pi-connector"
-deploy="$HOME/.local/share/openchamber-omo/connector-$tag"
+deploy="$HOME/.local/share/openchamber-omo/connector-$version"
 
 git -C "$repo" fetch --tags origin
 git -C "$repo" worktree add "$deploy" "$tag"
@@ -104,42 +114,74 @@ npm ci && npm run build
 OCPI_PI_BINARY="$HOME/.bun/install/global/node_modules/.bin/omo" npm run omo-smoke
 ```
 
-Only after build and smoke pass, preserve the current settings and atomically
-point OpenChamber at the new worktree:
+Require the smoke command to exit 0 with no failed or skipped checks. Only
+after build and smoke pass, preserve the current settings and atomically point
+OpenChamber at the new worktree. Do not overwrite an existing backup:
 
 ```bash
 settings="$HOME/.config/openchamber/settings.json"
-cp -p "$settings" "$settings.pre-$tag"
+backup="$settings.pre-$version"
+test ! -e "$backup"
+cp -p "$settings" "$backup"
 tmp=$(mktemp "${settings}.XXXXXX")
 jq --arg binary "$deploy/bin/opencode-pi" \
   '.opencodeBinary = $binary' "$settings" > "$tmp"
+chmod --reference="$settings" "$tmp"
 mv "$tmp" "$settings"
 systemctl --user restart openchamber
 ```
 
-Check `systemctl --user is-active openchamber` and
-`curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4096/`. The expected
-HTTP status is 200 or 401. Keep the prior deployment worktree available until
-the new tag is accepted.
+Within three minutes, confirm `systemctl --user is-enabled openchamber` and
+`systemctl --user is-active openchamber` succeed and
+`curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4096/` returns 200
+or 401. Keep the prior deployment worktree available until the new tag is
+accepted.
 
-## Roll back
+## Roll back to a previous OmO tag
 
-To return from an upgrade to the original `omo-v1` worktree without removing
-the OmO service configuration:
+To return from v6 to the retained v5 worktree without removing the OmO service
+configuration, change only `opencodeBinary` and restart:
 
 ```bash
+set -euo pipefail
 settings="$HOME/.config/openchamber/settings.json"
-previous="$HOME/.local/share/openchamber-omo/connector"
+previous="$HOME/.local/share/openchamber-omo/connector-v5"
 tmp=$(mktemp "${settings}.XXXXXX")
 jq --arg binary "$previous/bin/opencode-pi" \
   '.opencodeBinary = $binary' "$settings" > "$tmp"
+chmod --reference="$settings" "$tmp"
 mv "$tmp" "$settings"
 systemctl --user restart openchamber
 ```
 
-To restore the pre-OmO OpenChamber settings and use the default OpenCode
-backend, restore the verified backup, remove the drop-in, reload systemd, and
-restart the service:
+Verify the service is active and the local HTTP check returns 200 or 401.
+Keep all versioned worktrees until the deployment no longer needs them for
+rollback.
+
+## Roll back to plain OpenCode
+
+The plain OpenCode backend was verified live on October 13, 2026. Remove only
+the `opencodeBinary` override and restart OpenChamber; this preserves every
+other settings value:
+
+```bash
+set -euo pipefail
+settings="$HOME/.config/openchamber/settings.json"
+tmp=$(mktemp "${settings}.XXXXXX")
+jq 'del(.opencodeBinary)' "$settings" > "$tmp"
+chmod --reference="$settings" "$tmp"
+mv "$tmp" "$settings"
+systemctl --user restart openchamber
+```
+
+Confirm the service is active and the local HTTP check returns 200 or 401.
+With no `opencodeBinary` override, OpenChamber uses its normal OpenCode
+backend.
+
+## Restore the pre-OmO service configuration
+
+To restore the pre-OmO settings and remove the OmO-specific systemd drop-in,
+restore the verified backup, reload systemd, and restart the service:
 
 ```bash
 cp -p ~/.config/openchamber/settings.json.pre-omo \

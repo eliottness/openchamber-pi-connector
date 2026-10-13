@@ -14,7 +14,7 @@ import { ApprovalBridge, extensionUiRequestFrom, type PendingPermission, type Pe
 import { getAgentName } from "./agent-name.js";
 import { applyProviderToolResults, mapTool, providerToolParts, resultMetadata, resultText } from "./tool-map.js";
 import { TodoBridge, type Todo, type TodoUpdated } from "./todo-bridge.js";
-import { bindMessageEntries, forkConversation, getEntries, navigate, recordTurn, revertConversation, revertNotice, SessionTreeError, unrevertConversation, type SessionTreeState } from "./session-tree.js";
+import { bindMessageEntries, forkConversation, getEntries, navigate, recordTurn, restoreLocalShellTurns, revertConversation, revertNotice, SessionTreeError, unrevertConversation, type SessionTreeState } from "./session-tree.js";
 import { SubagentBridge, taskParts, updateTaskParts, taskCompletions } from "./subagents.js";
 import { sessionDiff, touchedFiles } from "./session-diff.js";
 import { announceSessionNotice, shellTitle, shellUserMessage } from "./session-commands.js";
@@ -478,7 +478,9 @@ export class SessionManager {
     s.messages = undefined;
     const messages = this.ensureMessages(s).map((message) => previous.get(message.info.id) ?? message);
     s.messages = messages;
-    for (const message of local) this.appendMessage(sessionId, message);
+    for (const message of local) {
+      if (!messages.some((item) => item.info.id === message.info.id)) this.appendMessage(sessionId, message);
+    }
     const ids = new Set(s.messages.map((message) => message.info.id));
     for (const message of previous.values()) {
       if (!ids.has(message.info.id)) {
@@ -575,6 +577,7 @@ export class SessionManager {
     sessionId: string,
     command: Omit<PiRpcCommand, "id">,
     signal?: AbortSignal,
+    onDispatch?: () => void,
   ): Promise<PiRpcResponse & { data?: T }> {
     const s = this.get(sessionId);
     if (!s) throw new Error(`unknown session: ${sessionId}`);
@@ -585,7 +588,7 @@ export class SessionManager {
       const pi = s.pi;
       if (pi === undefined) throw new Error(`session cannot be resumed: ${sessionId}`);
       this.lifecycle.touch(s);
-      const response = await pi.command<T>(command, 60_000, signal);
+      const response = await pi.command<T>(command, 60_000, signal, onDispatch);
       if (!signal?.aborted && response.success && (command.type === "compact" || command.type === "bash")) await this.reloadMessagesLive(s, signal);
       return response;
     });
@@ -865,7 +868,7 @@ export class SessionManager {
   private ensureMessages(s: ManagedSession): OCMessageWithParts[] {
     if (this.subagents.owns(s.info.id)) return this.subagents.messages(s.info.id);
     if (s.messages === undefined) {
-      s.messages = parsePiSessionFile(s, getAgentName());
+      s.messages = restoreLocalShellTurns(s, parsePiSessionFile(s, getAgentName()));
       this.subagents.discover(s, s.messages);
     }
     return s.messages;

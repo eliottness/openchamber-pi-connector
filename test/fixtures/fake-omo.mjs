@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { execSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -14,6 +14,7 @@ const child = spawn("sleep", ["300"], { stdio: "ignore" });
 const ignoring = process.argv.includes("--ignore-term");
 const requireGroup = process.argv.includes("--require-group");
 let stopping = false;
+let bashRun;
 let leaf = null;
 let records = readFileSync(sessionFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
 for (const record of records) if (record.type === "message") leaf = record.id;
@@ -27,6 +28,7 @@ const stop = (eof = false) => {
   }
   if (stopping) return;
   stopping = true;
+  if (bashRun) process.kill(-bashRun.proc.pid, "SIGTERM");
   // The group-kill fixture must not hide a root-only kill by killing its child.
   // EOF cleanup is a separate contract exercised by the connector SIGKILL test.
   if (eof) child.kill("SIGTERM");
@@ -111,15 +113,28 @@ input.on("line", (line) => {
   }
   if (command.type === "compact") record("assistant", "Compacted summary");
   if (command.type === "bash") {
-    data = {
-      output: execSync(command.command, { cwd: process.cwd(), encoding: "utf8" }),
-      exitCode: 0, cancelled: false, truncated: false,
-    };
-    const entry = { type: "message", id: randomUUID(), parentId: leaf, timestamp: Date.now(),
-      message: { role: "bashExecution", command: command.command, ...data } };
-    leaf = entry.id;
-    records.push(entry);
-    appendFileSync(sessionFile, JSON.stringify(entry) + "\n");
+    const proc = spawn("/bin/bash", ["-c", command.command], { cwd: process.cwd(), detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    const run = { proc, cancelled: false, output: "" };
+    bashRun = run;
+    proc.stdout.on("data", (chunk) => { run.output += chunk.toString(); });
+    proc.stderr.on("data", (chunk) => { run.output += chunk.toString(); });
+    proc.on("close", (exitCode) => {
+      bashRun = undefined;
+      const result = { output: run.output, exitCode, cancelled: run.cancelled, truncated: false };
+      const entry = { type: "message", id: randomUUID(), parentId: leaf, timestamp: Date.now(),
+        message: { role: "bashExecution", command: command.command, ...result } };
+      leaf = entry.id;
+      records.push(entry);
+      appendFileSync(sessionFile, JSON.stringify(entry) + "\n");
+      send({ type: "fake_bash_finished", command: command.command });
+      send({ type: "response", id: command.id, command: command.type, success: true, data: result });
+    });
+    send({ type: "fake_bash_started", command: command.command });
+    return;
+  }
+  if (command.type === "abort_bash" && bashRun) {
+    bashRun.cancelled = true;
+    process.kill(-bashRun.proc.pid, "SIGTERM");
   }
   if (command.type === "prompt") {
     record("user", command.message);

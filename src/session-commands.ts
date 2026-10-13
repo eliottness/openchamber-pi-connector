@@ -269,12 +269,15 @@ export async function runShellCommand(context: ShellCommandContext): Promise<She
   sessions.messages(session.info.id);
   const message = createShellMessage(session, command);
   const user = shellUserMessage(message);
+  const dispatch = session.tree.shellDispatch ??= {};
+  dispatch[message.info.id] = false;
+  const afterEntryId = session.tree.leafId ?? null;
   const controller = new AbortController();
   session.cancelShell = () => {
     delete session.cancelShell;
     // Agent abort does not stop user bash. Dispatch the dedicated RPC first,
     // then release our waiter; a correlated late response is discarded.
-    session.pi?.notify({ type: "abort_bash" });
+    if (dispatch[message.info.id]) session.pi?.notify({ type: "abort_bash" });
     controller.abort();
   };
   sessions.appendMessage(session.info.id, user);
@@ -284,7 +287,9 @@ export async function runShellCommand(context: ShellCommandContext): Promise<She
   shellEvent(context, { type: "message.part.updated", properties: { part: user.parts[0] } });
   emitShellMessage(context, message);
   try {
-    const response = await sessions.sessionRpc<unknown>(session.info.id, { type: "bash", command }, controller.signal);
+    const response = await sessions.sessionRpc<unknown>(session.info.id, { type: "bash", command }, controller.signal, () => {
+      dispatch[message.info.id] = true;
+    });
     if (controller.signal.aborted) throw controller.signal.reason;
     if (!response.success) {
       const error = response.error ?? "OmO bash failed";
@@ -312,5 +317,9 @@ export async function runShellCommand(context: ShellCommandContext): Promise<She
   } finally {
     delete session.cancelShell;
     setShellStatus(context, "idle");
+    if (!dispatch[message.info.id] && message.parts[0].state.status === "error") {
+      (session.tree.localShellTurns ??= []).push({ afterEntryId, messages: [user, message] });
+      sessions.update(session.info.id, {});
+    }
   }
 }

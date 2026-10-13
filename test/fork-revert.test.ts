@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test, { type TestContext } from "node:test";
-import { branchEntries, getEntries } from "../src/session-tree.js";
-import { SessionManager } from "../src/sessions.js";
+import { bindMessageEntries, branchEntries, getEntries } from "../src/session-tree.js";
+import { SessionManager, type ManagedSession } from "../src/sessions.js";
 import { SessionStore } from "../src/session-store.js";
 import { AdapterServer } from "../src/server.js";
-import { announceSessionNotice, runShellCommand } from "../src/session-commands.js";
+import { announceSessionNotice, completeShellMessage, createShellMessage, failShellMessage, runShellCommand, shellUserMessage } from "../src/session-commands.js";
 import type { PiRpcClient } from "../src/pi-rpc.js";
 
 function setup(t: TestContext) {
@@ -32,6 +33,184 @@ async function turns(manager: SessionManager, dir: string) {
   assert.ok(s?.pi);
   return { s, id: session.id, tree: await getEntries(s.pi) };
 }
+
+async function cancelQueuedShell(t: TestContext, manager: SessionManager, session: ManagedSession, command: string) {
+  const pi = session.pi;
+  assert.ok(pi);
+  const held = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  t.after(() => release.resolve());
+  const original = pi.command.bind(pi);
+  let hold = true;
+  t.mock.method(pi, "command", async <T>(...args: Parameters<PiRpcClient["command"]>) => {
+    const response = await original<T>(...args);
+    if (args[0].type === "get_entries" && hold) {
+      hold = false;
+      held.resolve();
+      await release.promise;
+    }
+    return response;
+  });
+  const refresh = manager.reloadMessages(session.info.id);
+  await held.promise;
+  try {
+    const pending = runShellCommand({ sessions: manager, session, command, emit: () => {} });
+    await manager.abort(session.info.id);
+    const cancelled = await pending;
+    assert.equal(cancelled.kind, "completed");
+    return cancelled.message;
+  } finally {
+    release.resolve();
+    await refresh;
+    await manager.reloadMessages(session.info.id);
+  }
+}
+
+test("a never-dispatched cancelled shell cannot claim an identical successful run", { timeout: 30_000 }, async (t) => {
+  const { manager, dir, state } = setup(t);
+  const info = await manager.create(dir);
+  await manager.prompt(info.id, "before", undefined, false, "msg_before");
+  const session = manager.get(info.id);
+  assert.ok(session?.pi);
+  const cancelled = await cancelQueuedShell(t, manager, session, "echo repeated");
+  const completed = await runShellCommand({ sessions: manager, session, command: "echo repeated", emit: () => {} });
+  assert.equal(completed.kind, "completed");
+  const entries = (await getEntries(session.pi)).entries.filter((entry) => entry.message?.role === "bashExecution");
+  assert.equal(entries.length, 1);
+  assert.equal(session.tree.messageEntries[cancelled.info.id], undefined, "the never-dispatched cancellation must remain unbound");
+  assert.equal(session.tree.messageEntries[cancelled.info.parentID], undefined);
+  assert.equal(session.tree.messageEntries[completed.message.info.id], entries[0]?.id);
+  assert.equal(session.tree.messageEntries[completed.message.info.parentID], entries[0]?.id);
+  await manager.reloadMessages(info.id);
+  const cards = manager.messages(info.id)?.filter((message) => message.parts.some((part) => part.type === "tool" && part.tool === "bash"));
+  assert.deepEqual(cards?.map((message) => message.info.id), [cancelled.info.id, completed.message.info.id]);
+  assert.equal(cards?.[0]?.parts[0]?.type === "tool" && cards[0].parts[0].state.status, "error");
+  assert.equal(cards?.[1]?.parts[0]?.type === "tool" && cards[1].parts[0].state.status, "completed");
+  await manager.fork(info.id, completed.message.info.id);
+  await manager.disposeAll();
+  const restored = new SessionManager(() => {}, new SessionStore(state), dir);
+  t.after(() => restored.disposeAll());
+  const restarted = restored.messages(info.id)?.filter((message) => message.parts.some((part) => part.type === "tool" && part.tool === "bash"));
+  assert.deepEqual(restarted?.map((message) => message.info.id), [cancelled.info.id, completed.message.info.id]);
+  assert.equal(restarted?.[0]?.parts[0]?.type === "tool" && restarted[0].parts[0].state.status, "error");
+  assert.equal(restarted?.[1]?.parts[0]?.type === "tool" && restarted[1].parts[0].state.status, "completed");
+  await restored.revert(info.id, completed.message.info.parentID);
+  await restored.unrevert(info.id);
+  await restored.fork(info.id, completed.message.info.id);
+});
+
+test("identical shell commands retain mixed cancellation outcomes and distinct tree boundaries", { timeout: 30_000 }, async (t) => {
+  const { manager, dir, state } = setup(t);
+  const info = await manager.create(dir);
+  await manager.prompt(info.id, "before", undefined, false, "msg_before");
+  const session = manager.get(info.id);
+  assert.ok(session?.pi);
+  const command = "if [ ! -f allow-shell ]; then IFS= read -r gate < shell-gate; fi; echo repeated";
+  execFileSync("mkfifo", [join(dir, "shell-gate")]);
+  const queued = await cancelQueuedShell(t, manager, session, command);
+  const started = Promise.withResolvers<void>();
+  const finished = Promise.withResolvers<void>();
+  const onEvent = (event: Record<string, unknown>) => {
+    if (event.type === "fake_bash_started") started.resolve();
+    if (event.type === "fake_bash_finished") finished.resolve();
+  };
+  session.pi.onEvent(onEvent);
+  const pending = runShellCommand({ sessions: manager, session, command, emit: () => {} });
+  await started.promise;
+  await manager.abort(info.id);
+  const cancelled = await pending;
+  assert.equal(cancelled.kind, "completed");
+  await finished.promise;
+  session.pi.off("event", onEvent);
+  await manager.reloadMessages(info.id);
+  writeFileSync(join(dir, "allow-shell"), "");
+  const successful = [];
+  for (let i = 0; i < 2; i++) {
+    const result = await runShellCommand({ sessions: manager, session, command, emit: () => {} });
+    assert.equal(result.kind, "completed");
+    successful.push(result.message);
+  }
+  const dispatched = [cancelled.message, ...successful];
+  const identities = [queued, ...dispatched].map((message) => message.info.id);
+  const tree = await getEntries(session.pi);
+  const native = tree.entries.filter((entry) => entry.message?.role === "bashExecution");
+  assert.equal(native.length, 3);
+  assert.equal(session.tree.messageEntries[queued.info.id], undefined);
+  for (const [index, message] of dispatched.entries()) {
+    assert.equal(session.tree.messageEntries[message.info.id], native[index]?.id);
+    assert.equal(session.tree.messageEntries[message.info.parentID], native[index]?.id);
+  }
+  await manager.reloadMessages(info.id);
+  const cards = manager.messages(info.id)?.filter((message) => message.parts.some((part) => part.type === "tool" && part.tool === "bash"));
+  assert.deepEqual(cards?.map((message) => message.info.id), identities);
+  assert.deepEqual(cards?.map((message) => message.parts[0]?.type === "tool" && message.parts[0].state.status), ["error", "error", "completed", "completed"]);
+  for (const message of dispatched) {
+    await manager.revert(info.id, message.info.parentID);
+    assert.equal(session.tree.leafId, native.find((entry) => entry.id === session.tree.messageEntries[message.info.id])?.parentId);
+    await manager.unrevert(info.id);
+    await manager.fork(info.id, message.info.id);
+  }
+  await manager.disposeAll();
+  const restored = new SessionManager(() => {}, new SessionStore(state), dir);
+  t.after(() => restored.disposeAll());
+  const restarted = restored.messages(info.id)?.filter((message) => message.parts.some((part) => part.type === "tool" && part.tool === "bash"));
+  assert.deepEqual(restarted?.map((message) => message.info.id), identities);
+  assert.deepEqual(restarted?.map((message) => message.parts[0]?.type === "tool" && message.parts[0].state.status), ["error", "error", "completed", "completed"]);
+  for (const message of dispatched) {
+    await restored.revert(info.id, message.info.parentID);
+    await restored.unrevert(info.id);
+    await restored.fork(info.id, message.info.id);
+  }
+});
+
+test("shell binding rejects conflicting outcomes, undispatched cards and reused entry bindings", async (t) => {
+  const { manager, dir } = setup(t);
+  const info = await manager.create(dir);
+  const session = manager.get(info.id);
+  assert.ok(session);
+  for (const conflict of ["output", "exitCode", "cancelled", "undispatched", "bound"]) {
+    const wrong = createShellMessage(session, "echo repeated");
+    const correct = createShellMessage(session, "echo repeated");
+    const result = { output: "repeated\n", exitCode: 0, cancelled: false, truncated: false };
+    completeShellMessage(wrong, "echo repeated", {
+      ...result, ...(conflict === "output" ? { output: "other\n" } : {}), ...(conflict === "exitCode" ? { exitCode: 7 } : {}),
+    });
+    if (conflict === "cancelled") failShellMessage(wrong, "echo repeated", "Command cancelled", { cancelled: true });
+    completeShellMessage(correct, "echo repeated", result);
+    session.messages = [shellUserMessage(wrong), wrong, shellUserMessage(correct), correct];
+    Object.assign(session.tree, { messageEntries: {}, shellDispatch: { [wrong.info.id]: conflict !== "undispatched", [correct.info.id]: true } });
+    if (conflict === "bound") session.tree.messageEntries[wrong.info.id] = "another_entry";
+    bindMessageEntries(session, { entries: [{
+      type: "message", id: "expected_entry", parentId: null,
+      message: { role: "bashExecution", command: "echo repeated", ...result },
+    }], leafId: "expected_entry" });
+    assert.equal(session.tree.messageEntries[wrong.info.id], conflict === "bound" ? "another_entry" : undefined, conflict);
+    assert.equal(session.tree.messageEntries[correct.info.id], "expected_entry", conflict);
+  }
+});
+
+test("an established shell binding takes precedence over an earlier identical candidate", async (t) => {
+  const { manager, dir } = setup(t);
+  const info = await manager.create(dir);
+  const session = manager.get(info.id);
+  assert.ok(session);
+  const earlier = createShellMessage(session, "echo repeated");
+  const known = createShellMessage(session, "echo repeated");
+  const result = { output: "repeated\n", exitCode: 0, cancelled: false, truncated: false };
+  for (const message of [earlier, known]) completeShellMessage(message, "echo repeated", result);
+  session.messages = [shellUserMessage(earlier), earlier, shellUserMessage(known), known];
+  Object.assign(session.tree, { shellDispatch: { [earlier.info.id]: true, [known.info.id]: true } });
+  session.tree.messageEntries[known.info.id] = "known_entry";
+  session.tree.messageEntries[known.info.parentID] = "known_entry";
+  bindMessageEntries(session, { entries: [{
+    type: "message", id: "known_entry", parentId: null,
+    message: { role: "bashExecution", command: "echo repeated", ...result },
+  }], leafId: "known_entry" });
+  assert.equal(session.tree.messageEntries[earlier.info.id], undefined);
+  assert.equal(session.tree.messageEntries[earlier.info.parentID], undefined);
+  assert.equal(session.tree.messageEntries[known.info.id], "known_entry");
+  assert.equal(session.tree.messageEntries[known.info.parentID], "known_entry");
+});
 
 test("fork stops before the selected live user and transfers the process away from the source", async (t) => {
   const { manager, dir } = setup(t);

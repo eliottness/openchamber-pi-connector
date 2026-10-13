@@ -176,7 +176,7 @@ export class PiRpcClient extends EventEmitter {
   }
 
   /** Send a command and wait for its correlated response. */
-  command<T = unknown>(cmd: Omit<PiRpcCommand, "id">, timeoutMs = 60_000, signal?: AbortSignal): Promise<PiRpcResponse & { data?: T }> {
+  command<T = unknown>(cmd: Omit<PiRpcCommand, "id">, timeoutMs = 60_000, signal?: AbortSignal, onDispatch?: () => void): Promise<PiRpcResponse & { data?: T }> {
     if (this.closed) return Promise.reject(new Error("pi process is not running"));
     if (signal?.aborted) return Promise.reject(signal.reason);
     const id = randomUUID();
@@ -206,6 +206,7 @@ export class PiRpcClient extends EventEmitter {
       });
       signal?.addEventListener("abort", onAbort, { once: true });
       this.write({ ...cmd, id });
+      onDispatch?.();
     });
   }
 

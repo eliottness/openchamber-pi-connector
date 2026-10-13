@@ -5,6 +5,10 @@ import type { OCMessageWithParts } from "./types.js";
 
 export interface SessionTreeState {
   messageEntries: Record<string, string>;
+  /** Actual transport dispatch, not inferred from a card's terminal state. */
+  shellDispatch?: Record<string, boolean>;
+  /** Adapter-only attempts have no OmO entry from which to restore their cards. */
+  localShellTurns?: Array<{ afterEntryId: string | null; messages: [OCMessageWithParts, OCMessageWithParts] }>;
   leafId?: string | null;
   revert?: { messageID: string; previousLeafId: string | null; targetId: string | null };
 }
@@ -13,7 +17,14 @@ export interface TreeEntry {
   type: string;
   id: string;
   parentId: string | null;
-  message?: { role: string; content?: Array<{ type: string; text?: string }>; command?: string };
+  message?: {
+    role: string;
+    content?: Array<{ type: string; text?: string }>;
+    command?: string;
+    output?: string;
+    exitCode?: number | null;
+    cancelled?: boolean;
+  };
 }
 
 export interface Entries {
@@ -22,6 +33,16 @@ export interface Entries {
 }
 
 export class SessionTreeError extends Error {}
+
+export function restoreLocalShellTurns(s: ManagedSession, messages: OCMessageWithParts[]): OCMessageWithParts[] {
+  for (const turn of [...(s.tree.localShellTurns ?? [])].reverse()) {
+    const anchor = turn.afterEntryId === null ? -1 :
+      messages.map((message) => s.tree.messageEntries[message.info.id]).lastIndexOf(turn.afterEntryId);
+    messages.splice(anchor + 1, 0, ...turn.messages);
+    for (const message of turn.messages) (s.localMessageIds ??= new Set()).add(message.info.id);
+  }
+  return messages;
+}
 
 export async function getEntries(pi: PiRpcClient, signal?: AbortSignal): Promise<Entries> {
   const response = await pi.command<Entries>({ type: "get_entries" }, 60_000, signal);
@@ -57,9 +78,31 @@ export function bindMessageEntries(s: ManagedSession, tree: Entries): void {
   let cursor = 0;
   for (const entry of entries) {
     const shell = entry.message?.role === "bashExecution";
+    const known = messages.findIndex((message) => (!shell || message.info.role === "assistant") &&
+      s.tree.messageEntries[message.info.id] === entry.id);
+    if (known >= 0) {
+      cursor = known + 1;
+      continue;
+    }
     if (shell) {
-      const index = messages.findIndex((message, i) => i >= cursor && message.info.role === "assistant" &&
-        message.parts.some((part) => part.type === "tool" && part.tool === "bash" && part.state.input.command === entry.message?.command));
+      const index = messages.findIndex((message, i) => {
+        if (i < cursor || message.info.role !== "assistant" ||
+          s.tree.shellDispatch?.[message.info.id] !== true ||
+          s.tree.messageEntries[message.info.id] !== undefined) return false;
+        const parentEntry = s.tree.messageEntries[message.info.parentID];
+        if (parentEntry !== undefined && parentEntry !== entry.id) return false;
+        const part = message.parts.find((part) => part.type === "tool" && part.tool === "bash" &&
+          part.state.input.command === entry.message?.command);
+        if (part?.type !== "tool" || part.state.status === "pending") return false;
+        const state = part.state;
+        if (state.status === "error" && (state.metadata?.cancelled !== true || entry.message?.cancelled !== true)) return false;
+        if (state.status === "completed" && entry.message?.cancelled === true) return false;
+        if (state.metadata?.cancelled !== undefined && state.metadata.cancelled !== (entry.message?.cancelled === true)) return false;
+        if (entry.message?.exitCode !== undefined && state.metadata?.exitCode !== undefined &&
+          state.metadata.exitCode !== entry.message.exitCode) return false;
+        if (state.status === "completed" && entry.message?.output !== undefined && state.output !== entry.message.output) return false;
+        return true;
+      });
       const assistant = messages[index];
       if (assistant?.info.role === "assistant") {
         const parentID = assistant.info.parentID;
@@ -71,11 +114,6 @@ export function bindMessageEntries(s: ManagedSession, tree: Entries): void {
         }
         cursor = index + 1;
       }
-      continue;
-    }
-    const known = messages.findIndex((message) => s.tree.messageEntries[message.info.id] === entry.id);
-    if (known >= 0) {
-      cursor = known + 1;
       continue;
     }
     const text = entry.message?.content?.filter((part) => part.type === "text").map((part) => part.text ?? "").join("");

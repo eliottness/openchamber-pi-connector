@@ -6,7 +6,7 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { PiRpcClient } from "./pi-rpc.js";
+import { PiRpcClient, type PiRpcCommand, type PiRpcResponse } from "./pi-rpc.js";
 import { SessionLifecycle, type LifecycleOptions } from "./lifecycle.js";
 import { getAgentName } from "./agent-name.js";
 import { ocIdFor, piSessionDir, piSessionsRootMtime, scanAllPiSessions, scanPiSessions, SessionStore, type ScannedSession } from "./session-store.js";
@@ -289,6 +289,13 @@ export class SessionManager {
     return this.ensureMessages(s);
   }
 
+  reloadMessages(sessionId: string): OCMessageWithParts[] | undefined {
+    const s = this.get(sessionId);
+    if (!s) return undefined;
+    s.messages = undefined;
+    return this.ensureMessages(s);
+  }
+
   statuses(): Record<string, OCSessionStatus> {
     const out: Record<string, OCSessionStatus> = {};
     for (const s of this.sessions.values()) out[s.info.id] = s.status; // dormant sessions are idle
@@ -301,6 +308,21 @@ export class SessionManager {
     if (s.pi === undefined) return true; // dormant sessions are idle by definition
     await s.pi.command({ type: "abort" }).catch(() => undefined);
     return true;
+  }
+
+  async sessionRpc<T = unknown>(
+    sessionId: string,
+    command: Omit<PiRpcCommand, "id">,
+  ): Promise<PiRpcResponse & { data?: T }> {
+    const s = this.get(sessionId);
+    if (!s) throw new Error(`unknown session: ${sessionId}`);
+    return this.lifecycle.use(s, async () => {
+      if (s.pi === undefined) await this.revive(s);
+      const pi = s.pi;
+      if (pi === undefined) throw new Error(`session cannot be resumed: ${sessionId}`);
+      this.lifecycle.touch(s);
+      return pi.command<T>(command);
+    });
   }
 
   /**

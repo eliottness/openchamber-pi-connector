@@ -111,11 +111,16 @@ export class AdapterServer {
   }
 
   async stop(): Promise<void> {
+    // Stop admission before ending SSE: its clients can reconnect while the
+    // session RPC groups and private task hosts are still being disposed.
+    const closed = new Promise<void>((resolve) => this.server.close(() => resolve()));
     for (const res of this.sseClients.keys()) res.end();
     try {
       await this.sessions.disposeAll();
     } finally {
-      await new Promise<void>((resolve) => this.server.close(() => resolve()));
+      // An in-flight HTTP request must not hold shutdown open after teardown.
+      this.server.closeAllConnections();
+      await closed;
     }
   }
 

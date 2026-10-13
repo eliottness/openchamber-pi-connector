@@ -23,8 +23,8 @@ export interface Entries {
 
 export class SessionTreeError extends Error {}
 
-export async function getEntries(pi: PiRpcClient): Promise<Entries> {
-  const response = await pi.command<Entries>({ type: "get_entries" });
+export async function getEntries(pi: PiRpcClient, signal?: AbortSignal): Promise<Entries> {
+  const response = await pi.command<Entries>({ type: "get_entries" }, 60_000, signal);
   if (!response.success || !response.data) throw new SessionTreeError(response.error ?? "OmO returned no session entries");
   return response.data;
 }
@@ -130,14 +130,14 @@ export async function unrevertConversation(s: ManagedSession, pi: PiRpcClient): 
   return true;
 }
 
-export async function navigate(pi: PiRpcClient, targetId: string | null): Promise<string | null> {
+export async function navigate(pi: PiRpcClient, targetId: string | null, signal?: AbortSignal): Promise<string | null> {
   // The protocol cannot address null. Selecting a root user resets its leaf.
   if (targetId === null) {
-    const tree = await getEntries(pi);
+    const tree = await getEntries(pi, signal);
     if (tree.leafId === null) return null;
     const root = tree.entries.find((entry) => entry.parentId === null && entry.message?.role === "user");
     if (!root) throw new SessionTreeError("Cannot locate the root conversation message");
-    const response = await pi.command<{ cancelled?: boolean; leafId: string | null }>({ type: "navigate_tree", targetId: root.id });
+    const response = await pi.command<{ cancelled?: boolean; leafId: string | null }>({ type: "navigate_tree", targetId: root.id }, 60_000, signal);
     if (!response.success || !response.data || response.data.cancelled) {
       throw new SessionTreeError(response.error ?? "Root conversation navigation was cancelled");
     }
@@ -146,7 +146,7 @@ export async function navigate(pi: PiRpcClient, targetId: string | null): Promis
   // Resume selects the exact parent, even when it is a user/custom message.
   const response = await pi.command<{ cancelled?: boolean; leafId: string | null }>({
     type: "navigate_tree", targetId, intent: "resume",
-  });
+  }, 60_000, signal);
   if (!response.success || !response.data) throw new SessionTreeError(response.error ?? "OmO returned no navigation result");
   if (response.data.cancelled) throw new SessionTreeError("Conversation navigation was cancelled");
   return response.data.leafId;

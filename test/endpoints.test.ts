@@ -91,7 +91,7 @@ async function startServer(t: TestContext) {
     rmSync(directory, { recursive: true, force: true });
   });
   await server.start();
-  return { url: server.url, directory };
+  return { url: server.url, directory, server };
 }
 
 async function createSession(url: string): Promise<string> {
@@ -220,6 +220,142 @@ test("empty shell commands return a client error without creating a card", { tim
     body: JSON.stringify({ command: "" }),
   });
   assert.equal(response.status, 400);
+});
+
+test("abort cancels a pending shell within ten seconds and tolerates repeated interruptions", { timeout: 30_000 }, async (t) => {
+  const { url, server } = await startServer(t);
+  const sessionId = await createSession(url);
+  const stream = startEvents(url);
+  t.after(stream.close);
+  await stream.ready;
+  const pi = server["sessions"].get(sessionId)?.pi;
+  assert.ok(pi);
+  let abortBashDispatched = false;
+  const pending = new Promise<void>((resolvePending) => {
+    pi.onEvent((event) => {
+      if (event.type === "fixture_bash_pending") resolvePending();
+      if (event.type === "fixture_abort_bash") abortBashDispatched = true;
+    });
+  });
+  const cancelled = stream.waitFor("message.part.updated", (event) =>
+    JSON.stringify(event).includes('"status":"error"') && JSON.stringify(event).includes('"cancelled":true'));
+  const idle = stream.waitFor("session.idle", (event) => event.properties?.sessionID === sessionId);
+  const shell = fetch(`${url}/session/${sessionId}/shell`, {
+    method: "POST", body: JSON.stringify({ command: "sleep 600" }), signal: AbortSignal.timeout(10_000),
+  });
+  await pending;
+  const started = performance.now();
+  const aborts = await Promise.all([1, 2].map(() => fetch(`${url}/session/${sessionId}/abort`, { method: "POST" })));
+  for (const response of aborts) {
+    assert.equal(response.status, 200);
+    assert.equal(await response.json(), true);
+  }
+  assert.equal((await shell).status, 200);
+  await Promise.all([cancelled, idle]);
+  assert.equal(abortBashDispatched, true);
+  assert.ok(performance.now() - started < 10_000);
+  assert.equal(server["sessions"].get(sessionId)?.status.type, "idle");
+  const resumed = await fetch(`${url}/session/${sessionId}/shell`, {
+    method: "POST", body: JSON.stringify({ command: "echo RESUMED" }),
+  });
+  assert.equal(resumed.status, 200);
+});
+
+test("a late bash reply cannot resurrect or duplicate a cancelled shell after reload", { timeout: 30_000 }, async (t) => {
+  const { url, server } = await startServer(t);
+  const sessionId = await createSession(url);
+  const pi = server["sessions"].get(sessionId)?.pi;
+  assert.ok(pi);
+  const pending = new Promise<void>((resolvePending) => {
+    pi.onEvent((event) => { if (event.type === "fixture_bash_pending") resolvePending(); });
+  });
+  const shell = fetch(`${url}/session/${sessionId}/shell`, {
+    method: "POST", body: JSON.stringify({ command: "sleep 600 late" }), signal: AbortSignal.timeout(10_000),
+  });
+  await pending;
+  await fetch(`${url}/session/${sessionId}/abort`, { method: "POST" });
+  assert.equal((await shell).status, 200);
+  assert.equal((await fetch(`${url}/session/${sessionId}/shell`, {
+    method: "POST", body: JSON.stringify({ command: "echo RELEASE_LATE" }),
+  })).status, 200);
+  await server["sessions"].reloadMessages(sessionId);
+  const messages = server["sessions"].messages(sessionId) ?? [];
+  const cancelled = messages.flatMap((message) => message.parts).filter((part) =>
+    part.type === "tool" && part.state.input.command === "sleep 600 late");
+  assert.equal(cancelled.length, 1);
+  assert.match(JSON.stringify(cancelled[0]), /"status":"error"/);
+  assert.match(JSON.stringify(cancelled[0]), /"cancelled":true/);
+  assert.doesNotMatch(JSON.stringify(messages), /STALE_SUCCESS/);
+  assert.equal(server["sessions"].get(sessionId)?.status.type, "idle");
+});
+
+test("a native cancelled bash reply without exitCode ends the card as cancelled", { timeout: 30_000 }, async (t) => {
+  const { url } = await startServer(t);
+  const sessionId = await createSession(url);
+  const response = await fetch(`${url}/session/${sessionId}/shell`, {
+    method: "POST", body: JSON.stringify({ command: "fixture-cancelled" }),
+  });
+  assert.equal(response.status, 200);
+  const history = await fetch(`${url}/session/${sessionId}/message`).then((res) => res.json());
+  assert.match(JSON.stringify(history), /"status":"error"/);
+  assert.match(JSON.stringify(history), /"cancelled":true/);
+  assert.match(JSON.stringify(history), /"exitCode":null/);
+});
+
+test("abort releases a shell waiting on history refresh and ignores the late entries reply", { timeout: 30_000 }, async (t) => {
+  const { url, server } = await startServer(t);
+  const sessionId = await createSession(url);
+  const pi = server["sessions"].get(sessionId)?.pi;
+  assert.ok(pi);
+  const pending = new Promise<void>((resolvePending) => {
+    pi.onEvent((event) => { if (event.type === "fixture_entries_pending") resolvePending(); });
+  });
+  const shell = fetch(`${url}/session/${sessionId}/shell`, {
+    method: "POST", body: JSON.stringify({ command: "fixture-reload-pending" }), signal: AbortSignal.timeout(10_000),
+  });
+  await pending;
+  const started = performance.now();
+  assert.equal((await fetch(`${url}/session/${sessionId}/abort`, { method: "POST" })).status, 200);
+  assert.equal((await shell).status, 200);
+  assert.ok(performance.now() - started < 10_000);
+  assert.equal(server["sessions"].get(sessionId)?.status.type, "idle");
+  assert.equal((await fetch(`${url}/session/${sessionId}/shell`, {
+    method: "POST", body: JSON.stringify({ command: "echo RELEASE_ENTRIES" }),
+  })).status, 200);
+  const parts = (server["sessions"].messages(sessionId) ?? []).flatMap((message) => message.parts)
+    .filter((part) => part.type === "tool" && part.state.input.command === "fixture-reload-pending");
+  assert.equal(parts.length, 1);
+  assert.match(JSON.stringify(parts), /"status":"error"/);
+  assert.match(JSON.stringify(parts), /"cancelled":true/);
+  assert.equal(server["sessions"].get(sessionId)?.status.type, "idle");
+});
+
+test("abort without a running shell is a no-op", { timeout: 30_000 }, async (t) => {
+  const { url, server } = await startServer(t);
+  const sessionId = await createSession(url);
+  const before = structuredClone(server["sessions"].messages(sessionId));
+  const response = await fetch(`${url}/session/${sessionId}/abort`, { method: "POST" });
+  assert.equal(response.status, 200);
+  assert.equal(await response.json(), true);
+  assert.deepEqual(server["sessions"].messages(sessionId), before);
+  assert.equal(server["sessions"].get(sessionId)?.status.type, "idle");
+});
+
+test("a print-only slash command renders its notification and returns idle without agent events", { timeout: 30_000 }, async (t) => {
+  const { url, server } = await startServer(t);
+  const sessionId = await createSession(url);
+  const stream = startEvents(url);
+  t.after(stream.close);
+  await stream.ready;
+  const output = stream.waitFor("message.part.updated", (event) => JSON.stringify(event).includes("Print-only command output"));
+  const idle = stream.waitFor("session.idle", (event) => event.properties?.sessionID === sessionId);
+  const response = await fetch(`${url}/session/${sessionId}/command`, {
+    method: "POST", body: JSON.stringify({ command: "notify-fixture", arguments: "" }),
+  });
+  assert.equal(response.status, 200);
+  assert.match(JSON.stringify(await response.json()), /Print-only command output/);
+  await Promise.all([output, idle]);
+  assert.equal(server["sessions"].get(sessionId)?.status.type, "idle");
 });
 
 test("shell refreshes persisted entries appended without agent events and retains its bash card", { timeout: 30_000 }, async (t) => {

@@ -11,6 +11,8 @@ let leaf;
 let timestamp = Date.now();
 let hasPrompt = false;
 let pendingBash;
+let holdEntries = false;
+let pendingEntries;
 const entries = [];
 
 if (!noSession) {
@@ -73,6 +75,11 @@ input.on("line", (line) => {
       });
       return;
     case "get_entries":
+      if (holdEntries) {
+        pendingEntries = command;
+        send({ type: "fixture_entries_pending" });
+        return;
+      }
       reply(command, true, { entries, leafId: leaf ?? null });
       return;
     case "get_commands":
@@ -83,6 +90,11 @@ input.on("line", (line) => {
     case "prompt": {
       const text = command.message;
       hasPrompt = true;
+      if (text === "/notify-fixture") {
+        send({ type: "extension_ui_request", id: randomUUID(), method: "notify", message: "Print-only command output", notifyType: "info" });
+        reply(command, true, { disposition: "handled" });
+        return;
+      }
       if (text === "/fixture") {
         recordMessage("assistant", "Slash command output without agent events");
         reply(command, true, {});
@@ -110,9 +122,26 @@ input.on("line", (line) => {
       reply(command, true, true);
       return;
     case "bash": {
-      if (command.command === "sleep 600") {
-        pendingBash = command;
+      if (command.command === "fixture-reload-pending") holdEntries = true;
+      if (command.command === "echo RELEASE_ENTRIES") {
+        holdEntries = false;
+        if (pendingEntries !== undefined) {
+          reply(pendingEntries, true, { entries, leafId: leaf ?? null });
+          pendingEntries = undefined;
+        }
+      }
+      if (command.command === "fixture-cancelled") {
+        reply(command, true, { output: "", cancelled: true, truncated: false });
         return;
+      }
+      if (command.command === "sleep 600" || command.command === "sleep 600 late") {
+        pendingBash = command;
+        send({ type: "fixture_bash_pending" });
+        return;
+      }
+      if (command.command === "echo RELEASE_LATE" && pendingBash !== undefined) {
+        reply(pendingBash, true, { output: "STALE_SUCCESS", exitCode: 0, cancelled: false, truncated: false });
+        pendingBash = undefined;
       }
       const match = command.command.match(/^exit\s+(\d+)$/);
       recordMessage("assistant", `Persisted shell output: ${command.command}`);
@@ -124,12 +153,16 @@ input.on("line", (line) => {
       });
       return;
     }
-    case "abort":
-      if (pendingBash !== undefined) {
+    case "abort_bash":
+      send({ type: "fixture_abort_bash" });
+      if (pendingBash !== undefined && pendingBash.command === "sleep 600") {
         const bash = pendingBash;
         pendingBash = undefined;
-        reply(bash, true, { output: "", exitCode: 130, cancelled: true, truncated: false });
+        reply(bash, true, { output: "", cancelled: true, truncated: false });
       }
+      reply(command, true, true);
+      return;
+    case "abort":
       reply(command, true, true);
       return;
     case "set_model":

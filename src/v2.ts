@@ -23,6 +23,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { getAgentName } from "./agent-name.js";
 import type { OCAssistantMessage, OCMessageWithParts, OCModelRef, OCPart, OCSession, OCSessionStatus, OCEvent } from "./types.js";
 
 function genId(prefix: string): string {
@@ -158,7 +159,7 @@ export function toV2Session(
   const session: V2Session = {
     id: info.id,
     projectID: info.projectID,
-    agent: opts.agent ?? "build",
+    agent: opts.agent ?? getAgentName(),
     cost: 0,
     tokens: zeroTokens(),
     time: {
@@ -462,7 +463,7 @@ export class V2EventTranslator {
       const step: StepState = {
         sessionID: info.sessionID,
         messageID: info.id,
-        agent: info.mode !== "" ? info.mode : "build",
+        agent: info.mode !== "" ? info.mode : getAgentName(),
         model: { id: info.modelID, providerID: info.providerID },
         cost: info.cost,
         tokens: info.tokens,

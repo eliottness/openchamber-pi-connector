@@ -78,13 +78,12 @@ export function getAgentName(): string {
 
 /**
  * Agent names the adapter publishes to OpenChamber's picker. pi has exactly one
- * agent, but OpenChamber's default-agent resolution prefers a primary agent
- * named `build` (and its settings UI assumes one exists), so `build` is always
- * published alongside pi's own name. Both are aliases for the same pi agent —
- * the requested agent name is not forwarded to pi, so selecting either runs
- * the same agent. When pi's name already is `build` the list collapses to one.
+ * agent. The resolved pi name is published first so OpenChamber chooses it for
+ * new sessions; `build` remains a compatibility alias for existing sessions.
+ * Both names run the same pi agent — the requested agent name is not forwarded
+ * to pi. When pi's name already is `build` the list collapses to one.
  */
 export function getExposedAgentNames(): string[] {
   const piName = getAgentName();
-  return piName === "build" ? ["build"] : ["build", piName];
+  return piName === "build" ? ["build"] : [piName, "build"];
 }

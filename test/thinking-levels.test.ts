@@ -8,6 +8,7 @@ import { SessionManager } from "../src/sessions.js";
 import { SessionStore } from "../src/session-store.js";
 import { AdapterServer } from "../src/server.js";
 import { systemClock } from "../src/lifecycle.js";
+import type { OCModelRef } from "../src/types.js";
 
 function setup(t: TestContext) {
   const directory = mkdtempSync(join(tmpdir(), "ocpi-thinking-"));
@@ -72,6 +73,40 @@ test("repeated prompt selection skips a second thinking command", async (t) => {
   await manager.prompt(session.id, "REPEAT_SELECTION", selection);
   assert.equal((await state(manager, session.id)).thinkingLevel, "high");
   assert.equal((await state(manager, session.id)).thinkingCalls, 1);
+});
+
+test("F2 B6 a later thinking selection cannot overtake a prompt's own selection", { timeout: 10_000 }, async (t) => {
+  const { directory, manager } = setup(t);
+  const session = await manager.create(directory);
+  const managed = manager.get(session.id);
+  assert.ok(managed?.pi && managed.piPath);
+  const pi = managed.pi;
+  const later = Promise.withResolvers<OCModelRef>();
+  const selection = { providerID: "fake", modelID: "fake-model" };
+  const overlap = (event: Record<string, unknown>): void => {
+    if (event.type !== "thinking_level_changed" || event.level !== "low") return;
+    pi.off("event", overlap);
+    void manager.setModel(session.id, { ...selection, variant: "high" }).then(later.resolve, later.reject);
+  };
+  pi.onEvent(overlap);
+  t.after(() => pi.off("event", overlap));
+  // Subscribe before prompting. The real fixture event places the later
+  // request between the low setter and its correlated state verification.
+  const results = await Promise.allSettled([
+    manager.prompt(session.id, "RACE_LOW", { ...selection, variant: "low" }),
+    later.promise,
+  ]);
+  for (const result of results) {
+    if (result.status === "rejected") assert.fail(String(result.reason));
+  }
+  await manager.prompt(session.id, "AFTER_HIGH");
+  const entries: Array<{ message?: { role: string; thinkingLevel: string; content: Array<{ text: string }> } }> =
+    readFileSync(managed.piPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const prompts = entries.flatMap((entry) => entry.message?.role === "user" ? [entry.message] : []);
+  assert.deepEqual(prompts.map((message) => [message.content[0]?.text, message.thinkingLevel]),
+    [["RACE_LOW", "low"], ["AFTER_HIGH", "high"]]);
+  assert.equal((await state(manager, session.id)).thinkingLevel, "high");
+  assert.equal(managed.thinkingLevel, "high");
 });
 
 test("no selection sends no thinking command", async (t) => {

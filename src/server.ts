@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import { debugLog, miscRoute } from "./misc-routes.js";
 import { execFile } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
-import { SessionManager } from "./sessions.js";
+import { SessionManager, type ManagedSession } from "./sessions.js";
 import { ApprovalInputError, toV2Permission } from "./approvals.js";
 import type { TodoUpdated } from "./todo-bridge.js";
 import { getAgentName, getExposedAgentNames } from "./agent-name.js";
@@ -114,6 +114,17 @@ export class AdapterServer {
     for (const res of this.sseClients.keys()) res.end();
     await this.sessions.disposeAll();
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
+  }
+
+  /** Both async APIs acknowledge admission; failures must reach SSE and history. */
+  private promptAsync(session: ManagedSession, text: string, model?: ModelSelection, noReply = false, messageID?: string): void {
+    void this.sessions.prompt(session.info.id, text, model, noReply, messageID).catch((error: unknown) => {
+      announceSessionError(
+        { sessions: this.sessions, session, emit: this.broadcast.bind(this) },
+        error instanceof Error ? error.name : "UnknownError",
+        error instanceof Error ? error.message : String(error),
+      );
+    });
   }
 
   // ---------------------------------------------------------------
@@ -291,13 +302,7 @@ export class AdapterServer {
             .map((p) => p.text ?? "")
             .join("\n");
           const model = modelRefFromBody(body.model ?? (body.variant !== undefined ? managed.model : undefined), body.variant);
-          void this.sessions.prompt(sessionId, text, model, body.noReply, body.messageID).catch((error: unknown) => {
-            announceSessionError(
-              { sessions: this.sessions, session: managed, emit: this.broadcast.bind(this) },
-              error instanceof Error ? error.name : "UnknownError",
-              error instanceof Error ? error.message : String(error),
-            );
-          });
+          this.promptAsync(managed, text, model, body.noReply, body.messageID);
           res.writeHead(204).end();
           return;
         }
@@ -935,9 +940,7 @@ export class AdapterServer {
           const text = typeof body.text === "string" ? body.text : "";
           const messageID = typeof body.id === "string" && body.id !== "" ? body.id : `msg_${randomUUID().replaceAll("-", "")}`;
           const model = modelRefFromBody(body.model ?? (body.variant !== undefined ? managed.model : undefined), body.variant);
-          void this.sessions.prompt(sessionId, text, model, false, messageID).catch((err) => {
-            console.error(`[prompt] session ${sessionId} failed:`, err);
-          });
+          this.promptAsync(managed, text, model, false, messageID);
           const delivery = typeof body.delivery === "string" ? body.delivery : "steer";
           this.json(res, 200, {
             data: {

@@ -612,7 +612,7 @@ export class SessionManager {
   async setModel(sessionId: string, ref: ModelSelection): Promise<OCModelRef> {
     const s = this.get(sessionId);
     if (s === undefined) throw new Error(`unknown session: ${sessionId}`);
-    return this.lifecycle.use(s, () => this.setModelLive(s, ref));
+    return this.operation(s, () => this.setModelLive(s, ref));
   }
 
   private async setModelLive(s: ManagedSession, ref: ModelSelection): Promise<OCModelRef> {
@@ -708,7 +708,8 @@ export class SessionManager {
     // model as though the switch had happened.
     if (model !== undefined) {
       try {
-        await this.setModel(sessionId, model);
+        // This prompt already owns the operation queue; do not enqueue recursively.
+        await this.setModelLive(s, model);
       } catch (err) {
         this.emit(s.info.directory, {
           type: "session.error",

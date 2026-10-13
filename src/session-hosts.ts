@@ -64,21 +64,21 @@ export async function stopSessionHosts(created: ReadonlyMap<string, string>): Pr
   await Promise.all(hosts.map(async (host) => {
     const members = processes.filter((info) => info.group === host.group);
     const signal = (value: NodeJS.Signals): void => {
-      const live = members.filter(alive);
-      if (live.length === 0) return;
-      for (const member of live) {
-        try {
-          if (readFileSync(`/proc/${member.pid}/cgroup`, "utf8").includes("/openchamber.service")) {
-            throw new Error(`refusing to signal live service pid=${member.pid}`);
-          }
-        } catch (error) {
-          if (!(error instanceof Error && "code" in error && ["ENOENT", "ESRCH"].includes(String(error.code)))) throw error;
+      // Ownership comes from the parent-session shard, cwd and private group
+      // above, not the cgroup: production hosts share the connector's service.
+      // Signal only captured identities still in that owned group, never a
+      // whole service or an uncaptured process that later joins/reuses a group.
+      for (const member of members) {
+        const current = processInfo(member.pid);
+        if (!current || current.start !== member.start || current.state === "Z") continue;
+        if (current.group !== host.group) {
+          throw new Error(`private OmO host member pid=${member.pid} changed process group`);
         }
-      }
-      try {
-        process.kill(-host.group, value);
-      } catch (error) {
-        if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error;
+        try {
+          process.kill(member.pid, value);
+        } catch (error) {
+          if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error;
+        }
       }
     };
     // Subscribe before signalling; GNU tail observes PID death, not a fixed delay.

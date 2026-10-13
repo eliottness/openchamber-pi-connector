@@ -48,7 +48,7 @@ const thinkingModels = [
 ];
 const record = (role, text) => {
   const entry = { type: "message", id: randomUUID(), parentId: leaf, timestamp: Date.now(),
-    message: { role, content: [{ type: "text", text }], provider: model.provider, model: model.id } };
+    message: { role, content: [{ type: "text", text }], provider: model.provider, model: model.id, thinkingLevel } };
   leaf = entry.id;
   appendFileSync(sessionFile, JSON.stringify(entry) + "\n");
   records.push(entry);

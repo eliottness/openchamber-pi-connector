@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import fs, { mkdtempSync, rmSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -10,6 +11,7 @@ import { PiRpcClient } from "../src/pi-rpc.js";
 import type { LifecycleClock } from "../src/lifecycle.js";
 import { SessionManager } from "../src/sessions.js";
 import { SessionStore } from "../src/session-store.js";
+import { stopSessionHosts } from "../src/session-hosts.js";
 
 const fixture = resolve("test/fixtures/fake-omo.mjs");
 const deadline = () => AbortSignal.timeout(10_000);
@@ -142,6 +144,56 @@ test("hung OmO receives SIGKILL at the injected five second deadline", { timeout
   assert.equal(signal, "SIGKILL");
   gone(before.pid);
   gone(before.childPid);
+});
+
+test("F2 B4 private hosts in the connector service cgroup stop while shared LSP survives", { timeout: 20_000 }, async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "ocpi-service-host-"));
+  const owner = randomUUID();
+  const socket = join(dir, `p-${createHash("sha256").update(`p:${owner}`).digest("hex").slice(0, 16)}.sock`);
+  const host = spawn(process.execPath, [
+    resolve("test/fixtures/fake-omo-host.mjs"), "--internal-rpc-host-supervisor", "--socket", socket,
+  ], { cwd: dir, detached: true, stdio: ["ignore", "pipe", "ignore"] });
+  const hostExited = once(host, "exit", { signal: deadline() });
+  const lsp = spawn(process.execPath, [
+    "-e", 'process.stdout.write("READY\\n"); setInterval(() => {}, 2147483647)',
+    "--", "--lsp-daemon", "--socket", socket,
+  ], { cwd: dir, detached: true, stdio: ["ignore", "pipe", "ignore"] });
+  const lspExited = once(lsp, "exit", { signal: deadline() });
+  const readFile = fs.readFileSync;
+  t.after(async () => {
+    fs.readFileSync = readFile;
+    syncBuiltinESMExports();
+    if (host.exitCode === null && host.signalCode === null) host.kill("SIGTERM");
+    if (lsp.exitCode === null && lsp.signalCode === null) lsp.kill("SIGTERM");
+    await Promise.all([hostExited, lspExited]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+  assert.ok(host.stdout && lsp.stdout && lsp.pid);
+  const lspPid = lsp.pid;
+  const [[output]] = await Promise.all([
+    once(host.stdout, "data", { signal: deadline() }),
+    once(lsp.stdout, "data", { signal: deadline() }),
+  ]);
+  const identity: { pid: number; enginePid: number } = JSON.parse(String(output));
+  const pids = [process.pid, identity.pid, identity.enginePid, lsp.pid];
+  for (const pid of pids) {
+    assert.doesNotMatch(readFile(`/proc/${pid}/cgroup`, "utf8"), /\/openchamber\.service/);
+  }
+  // Only these test-owned identities receive simulated metadata, never the real service.
+  const cgroups = new Set(pids.map((pid) => `/proc/${pid}/cgroup`));
+  t.mock.method(fs, "readFileSync", (path: fs.PathOrFileDescriptor, ...options: unknown[]) => {
+    if (cgroups.has(String(path))) return "0::/user.slice/openchamber.service\n";
+    return Reflect.apply(readFile, fs, [path, ...options]);
+  });
+  syncBuiltinESMExports();
+  assert.equal(fs.readFileSync(`/proc/${process.pid}/cgroup`, "utf8"),
+    fs.readFileSync(`/proc/${identity.pid}/cgroup`, "utf8"));
+
+  await stopSessionHosts(new Map([[owner, dir]]));
+  await hostExited;
+  gone(identity.pid);
+  gone(identity.enginePid);
+  assert.doesNotThrow(() => process.kill(lspPid, 0), "shared LSP is not a private supervisor, even with matching cwd and socket");
 });
 
 test("reaper makes an expired session dormant and preserves registry and history", async (t) => {

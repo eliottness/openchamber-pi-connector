@@ -416,7 +416,7 @@ test("F2 B5 abort cancels a queued shell before the preceding refresh completes"
   })).status, 200);
 });
 
-test("F2 B3 async prompt registry failure emits an error and retains visible failed state", { timeout: 15_000 }, async (t) => {
+for (const version of ["v1", "v2"]) test(`F2 B3 ${version} async prompt registry failure emits an error and retains visible failed state`, { timeout: 15_000 }, async (t) => {
   const { url, server } = await startServer(t);
   const sessionId = await createSession(url);
   const manager = server["sessions"];
@@ -435,10 +435,14 @@ test("F2 B3 async prompt registry failure emits an error and retains visible fai
   await stream.ready;
   const error = stream.waitFor("session.error", (event) => event.properties?.sessionID === sessionId);
   void error.catch(() => undefined);
-  const response = await fetch(`${url}/session/${sessionId}/prompt_async`, {
-    method: "POST", body: JSON.stringify({ messageID: "msg_failed_prompt", parts: [{ type: "text", text: "P3" }] }),
+  const path = version === "v1" ? `/session/${sessionId}/prompt_async` : `/api/session/${sessionId}/prompt`;
+  const body = version === "v1"
+    ? { messageID: "msg_failed_prompt", parts: [{ type: "text", text: "P3" }] }
+    : { id: "msg_failed_prompt", text: "P3" };
+  const response = await fetch(url + path, {
+    method: "POST", body: JSON.stringify(body),
   });
-  assert.equal(response.status, 204);
+  assert.equal(response.status, version === "v1" ? 204 : 200);
   await manager["operations"].get(sessionId);
   assert.equal(commands.includes("prompt"), false);
   // The direct control must still propagate the same essential write failure.

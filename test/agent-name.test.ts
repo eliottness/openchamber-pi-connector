@@ -138,6 +138,38 @@ test("build agent is hidden when OmO is resolved", () => {
   }
 });
 
+function agentDefaultsFor(level: string): Array<{ model?: unknown; variant?: unknown }> {
+  const state = mkdtempSync(join(tmpdir(), "ocpi-agent-effort-"));
+  try {
+    const result = fetchConfigs({
+      HOME: state,
+      OCPI_AGENT: "OmO",
+      OCPI_PI_BINARY: join(root, "test/fixtures/fake-omo-endpoints.mjs"),
+      OCPI_STATE_DIR: state,
+      OCPI_TEST_DIRECTORY: state,
+      FAKE_THINKING_LEVEL: level,
+    });
+    const v2 = (result.v2Agents as unknown as { data: Array<{ model?: unknown; variant?: unknown }> }).data;
+    return [...(result.v1Agents as Array<{ model?: unknown; variant?: unknown }>), ...v2];
+  } finally {
+    rmSync(state, { recursive: true, force: true });
+  }
+}
+
+test("agents advertise OmO's resolved model and thinking level as their default", () => {
+  for (const agent of agentDefaultsFor("medium")) {
+    assert.deepEqual(agent.model, { providerID: "fake", modelID: "fake-model" });
+    assert.equal(agent.variant, "medium");
+  }
+});
+
+test("a thinking level the model does not offer is not advertised", () => {
+  for (const agent of agentDefaultsFor("off")) {
+    assert.deepEqual(agent.model, { providerID: "fake", modelID: "fake-model" });
+    assert.equal(agent.variant, undefined);
+  }
+});
+
 test("build agent is visible when no OmO name is resolved", () => {
   const state = mkdtempSync(join(tmpdir(), "ocpi-build-visible-"));
   try {

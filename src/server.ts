@@ -11,7 +11,7 @@ import { SessionManager, type ManagedSession } from "./sessions.js";
 import { ApprovalInputError, toV2Permission } from "./approvals.js";
 import type { TodoUpdated } from "./todo-bridge.js";
 import { getAgentName, getExposedAgentNames } from "./agent-name.js";
-import { loadCatalog, type Catalog } from "./catalog.js";
+import { agentDefaults, loadCatalog, type Catalog } from "./catalog.js";
 import type { ModelSelection } from "./thinking-levels.js";
 import {
   announceSessionError,
@@ -230,7 +230,7 @@ export class AdapterServer {
       return;
     }
 
-    // --- opencode v2 API surface (OpenChamber 2.0.4 web UI) ---
+    // --- opencode v2 API surface (called by OpenChamber 1.24.2 web UI) ---
     if (path === "/api" || path.startsWith("/api/")) {
       await this.handleV2(req, res, url, path, method, directory);
       return;
@@ -554,6 +554,7 @@ export class AdapterServer {
       // which looks for `build` — has a real option. Both names run the same
       // pi agent (see getExposedAgentNames).
       const piName = getAgentName();
+      const defaults = agentDefaults(await this.catalog());
       this.json(res, 200, getExposedAgentNames().map((name) => ({
         name,
         description:
@@ -563,6 +564,7 @@ export class AdapterServer {
         mode: "primary",
         hidden: name === "build" && piName !== "build",
         options: {},
+        ...defaults,
       })));
       return;
     }
@@ -571,11 +573,12 @@ export class AdapterServer {
   }
 
   // ---------------------------------------------------------------
-  // opencode v2 API surface (OpenChamber 2.0.4 web UI)
+  // opencode v2 API surface (called by OpenChamber 1.24.2 web UI)
   // ---------------------------------------------------------------
 
-  private v2Agents(): Array<{ id: string; name: string; description: string; mode: string; hidden: boolean; options: Record<string, unknown> }> {
+  private async v2Agents(): Promise<Array<{ id: string; name: string; description: string; mode: string; hidden: boolean; options: Record<string, unknown>; model?: { providerID: string; modelID: string }; variant?: string }>> {
     const piName = getAgentName();
+    const defaults = agentDefaults(await this.catalog());
     return getExposedAgentNames().map((name) => ({
       id: name,
       name,
@@ -586,6 +589,7 @@ export class AdapterServer {
       mode: "primary",
       hidden: name === "build" && piName !== "build",
       options: {},
+      ...defaults,
     }));
   }
 
@@ -653,13 +657,13 @@ export class AdapterServer {
       return;
     }
     if (path === "/api/agent" && method === "GET") {
-      this.json(res, 200, withLocation(this.v2Agents()));
+      this.json(res, 200, withLocation(await this.v2Agents()));
       return;
     }
     const agentMatch = path.match(/^\/api\/agent\/([^/]+)$/);
     if (agentMatch && method === "GET") {
       const agentId = decodeURIComponent(agentMatch[1]!);
-      const agent = this.v2Agents().find((a) => a.id === agentId);
+      const agent = (await this.v2Agents()).find((a) => a.id === agentId);
       if (!agent) {
         this.json(res, 404, { name: "NotFoundError", data: { message: `agent not found: ${agentId}` } });
         return;

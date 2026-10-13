@@ -69,11 +69,17 @@ input.on("line", (line) => {
   switch (command.type) {
     case "get_state":
       reply(command, true, {
-        model: { provider: "fake", id: "fake-model" },
+        model: process.env.FAKE_THINKING_LEVEL === undefined
+          ? { provider: "fake", id: "fake-model" }
+          : { provider: "fake", id: "fake-model", reasoning: true, supportedThinkingLevels: ["low", "medium", "high"] },
+        ...(process.env.FAKE_THINKING_LEVEL === undefined ? {} : { thinkingLevel: process.env.FAKE_THINKING_LEVEL }),
         sessionId,
         sessionFile,
         isStreaming: false,
       });
+      return;
+    case "get_available_models":
+      reply(command, true, { models: [] });
       return;
     case "get_entries":
       if (holdEntries) {

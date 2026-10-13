@@ -59,6 +59,19 @@ export interface Catalog {
    * believes is running.
    */
   default?: { providerID: string; modelID: string };
+  /** pi's resolved thinking level for `default` (its per-model setting). */
+  defaultThinkingLevel?: string;
+}
+
+/**
+ * OpenChamber preselects an agent's `model` + `variant` for new sessions; publish
+ * pi's active model and its resolved thinking level so "Default" is pi's level.
+ */
+export function agentDefaults(cat: Catalog): { model?: { providerID: string; modelID: string }; variant?: string } {
+  if (cat.default === undefined) return {};
+  return cat.defaultThinkingLevel !== undefined
+    ? { model: cat.default, variant: cat.defaultThinkingLevel }
+    : { model: cat.default };
 }
 
 function toOCModel(m: PiModelInfo): OCv2Model {
@@ -95,7 +108,7 @@ export async function loadCatalog(directory: string): Promise<Catalog> {
   try {
     const [modelsRes, firstState] = await Promise.all([
       pi.command<{ models: PiModelInfo[] }>({ type: "get_available_models" }),
-      pi.command<{ model: PiModelInfo | null }>({ type: "get_state" }),
+      pi.command<{ model: PiModelInfo | null; thinkingLevel?: string }>({ type: "get_state" }),
     ]);
 
     const providers = new Map<string, OCv2Provider>();
@@ -113,9 +126,11 @@ export async function loadCatalog(directory: string): Promise<Catalog> {
     // get_state occasionally races pi's own startup. One retry beats resolving
     // no active model, which is precisely what leaves the UI picker guessing.
     let active = firstState.success ? firstState.data?.model ?? null : null;
+    let thinkingLevel = firstState.success ? firstState.data?.thinkingLevel : undefined;
     if (active === null) {
-      const retry = await pi.command<{ model: PiModelInfo | null }>({ type: "get_state" });
+      const retry = await pi.command<{ model: PiModelInfo | null; thinkingLevel?: string }>({ type: "get_state" });
       active = retry.success ? retry.data?.model ?? null : null;
+      thinkingLevel = retry.success ? retry.data?.thinkingLevel : undefined;
     }
     if (active === null) {
       console.error("[catalog] warning: pi reported no active model — /api/model/default will be null and the UI picker falls back to its own default");
@@ -151,7 +166,12 @@ export async function loadCatalog(directory: string): Promise<Catalog> {
     }
 
     // exactOptionalPropertyTypes: omit `default` rather than set it undefined.
-    return resolvedDefault !== undefined ? { providers: sorted, defaults, default: resolvedDefault } : { providers: sorted, defaults };
+    if (resolvedDefault === undefined) return { providers: sorted, defaults };
+    // Only a level the catalog offers as a variant is selectable in the picker.
+    const offered = sorted.find((p) => p.id === resolvedDefault.providerID)?.models[resolvedDefault.modelID]?.variants;
+    return thinkingLevel !== undefined && offered?.[thinkingLevel] !== undefined
+      ? { providers: sorted, defaults, default: resolvedDefault, defaultThinkingLevel: thinkingLevel }
+      : { providers: sorted, defaults, default: resolvedDefault };
   } finally {
     await pi.dispose();
   }

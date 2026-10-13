@@ -18,6 +18,6 @@ export function register(check: Check, context: SmokeContext, isolated = false):
     const death = context.waitForDeath(pids, 15_000, signal);
     await context.stop(signal);
     await death;
-    await context.assertShutdownProcesses(signal);
+    await context.assertShutdownProcesses();
   }, { dependsOn: [isolated ? "shutdown-start" : "routes"] });
 }

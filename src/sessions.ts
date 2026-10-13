@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { PiRpcClient, type PiRpcCommand, type PiRpcResponse } from "./pi-rpc.js";
+import { stopSessionHosts } from "./session-hosts.js";
 import { SessionLifecycle, type LifecycleOptions } from "./lifecycle.js";
 import { ApprovalBridge, extensionUiRequestFrom, type PendingPermission, type PendingQuestion } from "./approvals.js";
 import { getAgentName } from "./agent-name.js";
@@ -106,6 +107,9 @@ function piModelId(responseModel: unknown, model: unknown): unknown {
 export class SessionManager {
   private disposed = false;
   private operations = new Map<string, Promise<unknown>>();
+  /** Connector-created session trees, including persisted ownership after restart. */
+  private createdSessions = new Map<string, string>();
+  private hostShutdown: Promise<void> | undefined;
   private sessions = new Map<string, ManagedSession>();
   private dirtyDiffs = new Set<string>();
   private diffEmissions = new Map<string, Promise<void>>();
@@ -149,6 +153,7 @@ export class SessionManager {
     // Deterministic id derived from pi's session id, so a session keeps the
     // same OpenChamber id across adapter restarts (create once, restore later).
     const piSessionId = typeof state.data.sessionId === "string" && state.data.sessionId !== "" ? state.data.sessionId : undefined;
+    if (piSessionId !== undefined) this.createdSessions.set(piSessionId, directory);
     const info: OCSession = {
       id: piSessionId !== undefined ? ocIdFor(piSessionId) : id("ses"),
       projectID: directory,
@@ -390,6 +395,7 @@ export class SessionManager {
     return this.treeSession(sessionId, async (s, pi) => {
       const tree = await this.syncTree(s);
       const state = await forkConversation(s, pi, tree, messageID);
+      this.createdSessions.set(state.sessionId, s.info.directory);
       const now = Date.now();
       const child = this.adopt({
         piSessionId: state.sessionId, piPath: state.sessionFile, directory: s.info.directory,
@@ -568,7 +574,8 @@ export class SessionManager {
   ): Promise<PiRpcResponse & { data?: T }> {
     const s = this.get(sessionId);
     if (!s) throw new Error(`unknown session: ${sessionId}`);
-    return this.operation(s, async () => {
+    signal?.throwIfAborted();
+    const pending = this.operation(s, async () => {
       signal?.throwIfAborted();
       if (s.pi === undefined) await this.revive(s);
       const pi = s.pi;
@@ -578,6 +585,19 @@ export class SessionManager {
       if (!signal?.aborted && response.success && (command.type === "compact" || command.type === "bash")) await this.reloadMessagesLive(s, signal);
       return response;
     });
+    if (!signal) return pending;
+    // Cancel the caller's wait without releasing the conversation queue. The
+    // queued action checks the signal before dispatch when its predecessor ends.
+    let onAbort: (() => void) | undefined;
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => reject(signal.reason);
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+      return await Promise.race([pending, aborted]);
+    } finally {
+      if (onAbort) signal.removeEventListener("abort", onAbort);
+    }
   }
 
   /**
@@ -766,6 +786,7 @@ export class SessionManager {
   async disposeAll(): Promise<void> {
     for (const s of this.sessions.values()) s.approvals?.cancelAll();
     await this.lifecycle.stop();
+    await (this.hostShutdown ??= stopSessionHosts(this.createdSessions));
     this.disposed = true;
     this.subagents.dispose();
     await Promise.all(this.diffEmissions.values());
@@ -899,6 +920,7 @@ export class SessionManager {
       hasRunningChildren: () => false,
     };
     this.sessions.set(ocId, managed);
+    if (reg?.connectorOwned === true) this.createdSessions.set(sc.piSessionId, sc.directory);
     this.subagents.wire(managed);
     return managed;
   }
@@ -931,6 +953,7 @@ export class SessionManager {
     const piSessionId = s.piSessionId ?? s.restored?.piSessionId;
     if (piPath === undefined || piSessionId === undefined) return;
     this.store.set(s.info.id, {
+      ...(this.createdSessions.has(piSessionId) ? { connectorOwned: true } : {}),
       tree: s.tree,
       piSessionId,
       piPath,

@@ -288,7 +288,13 @@ export class AdapterServer {
             .filter((p) => p.type === "text" && typeof p.text === "string")
             .map((p) => p.text ?? "")
             .join("\n");
-          void this.sessions.prompt(sessionId, text, body.model, body.noReply, body.messageID).catch(() => undefined);
+          void this.sessions.prompt(sessionId, text, body.model, body.noReply, body.messageID).catch((error: unknown) => {
+            announceSessionError(
+              { sessions: this.sessions, session: managed, emit: this.broadcast.bind(this) },
+              error instanceof Error ? error.name : "UnknownError",
+              error instanceof Error ? error.message : String(error),
+            );
+          });
           res.writeHead(204).end();
           return;
         }

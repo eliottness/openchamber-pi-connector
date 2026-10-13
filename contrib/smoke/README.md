@@ -17,13 +17,16 @@ is removed on completion, failure, SIGINT, or SIGTERM.
 
 OmO uses the copied configuration unchanged, including speculative task-host
 prewarming. Detached task-host supervisors and their multi-session engines have
-a 15-minute idle policy after their last client leaves. Shutdown fails if any
-connector session RPC process survives SIGTERM. Surviving detached hosts are
-reported with PID, command line, and expected self-expiry, then terminated by
-scoped harness cleanup **inside the shutdown check**. A workspace-owned detached
-OmO LSP daemon is likewise reported and terminated. Shutdown cannot PASS until
-every owned process is gone; any helper surviving cleanup is a FAIL. Session
-RPCs and unknown processes fail before fallback cleanup can hide them.
+a 15-minute idle policy after their last client leaves. These shards belong to
+their parent session tree: the connector stops hosts for sessions it created.
+Shutdown fails if any connector session RPC group, private task host or unknown
+process survives SIGTERM, **before harness cleanup runs**.
+The LSP daemon is shared by HOME/version across sessions and projects. It and
+its observed descendants, outside recorded connector RPC groups, are reported with PID and
+command line as `NON-CONNECTOR OmO-owned, outside connector scope`; the installed
+daemon's idle policy is 30 minutes. The separate final cleanup removes these
+test-owned helpers from the private HOME. That cleanup is never counted as
+connector shutdown success. See `docs/architecture.md` for ownership evidence.
 Inherited RPC socket, watchdog, and
 cleanup-path variables are stripped so QA cannot attach to the caller's host.
 The isolated HOME passes OmO's documented onboarding-disable CLI flag and
@@ -107,8 +110,8 @@ start times and process groups. Reparented processes are adopted only when
 `/proc/<pid>/cwd` is inside this run's unique root AND `/proc/<pid>/environ`
 contains an exact private HOME or coding-agent directory. A command-line match
 alone never establishes ownership. The supervisor flag and multi-session flag
-classify owned hosts, and the exact OmO LSP daemon entrypoint classifies the
-detached language service; ordinary `--mode rpc` and unknown processes remain
-strict shutdown failures. Cleanup asserts no owned processes remain before
+classify private hosts, and the exact OmO LSP daemon entrypoint classifies the
+shared language service outside RPC groups; task hosts, ordinary `--mode rpc`
+and unknown processes remain strict shutdown failures. Cleanup asserts no owned processes remain before
 removing the workspace. It never kills by command-line pattern.
 Linux `/proc` and GNU `tail --pid` are required for lifecycle checks.

@@ -184,12 +184,13 @@ export function createShellMessage(session: ManagedSession, command: string): Sh
   return { info, parts: [part] };
 }
 
-export function announceSessionNotice(context: ShareNoticeContext, messageText: string): void {
+export function announceSessionNotice(context: ShareNoticeContext, messageText: string, error?: OCAssistantMessage["error"]): void {
   const { session, sessions, emit } = context;
   if (!sessions.messages(session.info.id)) return;
   const info = assistantMessage(session);
   const created = info.time.created;
   info.time.completed = created;
+  if (error) info.error = error;
   const part: OCTextPart = {
     id: id("prt"),
     sessionID: session.info.id,
@@ -205,7 +206,7 @@ export function announceSessionNotice(context: ShareNoticeContext, messageText: 
 }
 
 export function announceSessionError(context: ShareNoticeContext, errorName: string, messageText: string): void {
-  announceSessionNotice(context, messageText);
+  announceSessionNotice(context, messageText, { name: errorName, data: { message: messageText } });
   context.emit(context.session.info.directory, {
     type: "session.error",
     properties: { sessionID: context.session.info.id, error: { name: errorName, data: { message: messageText } } },

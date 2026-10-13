@@ -70,6 +70,10 @@ HTTP 400 before navigation.
 History refreshes and compact/bash RPCs share the conversation-operation queue
 with prompt, fork, revert and unrevert. A refresh cannot read an intermediate
 navigation state or overwrite the cursor before its operation completes.
+An abort can release a queued shell's HTTP waiter immediately, but cannot
+release that ordering barrier: when the predecessor completes, the cancelled
+entry rejects before dispatching any bash RPC. Later operations still wait for
+the predecessor. A dispatched shell continues to use `abort_bash`.
 
 Adapter-authored shell cards and notices are retained in canonical in-memory
 history, not appended to the revert-notice projection. While reverted, new
@@ -88,6 +92,70 @@ not across connector restarts: adapter-only cards are not persisted transcripts.
 | `session.status` / `session.idle` | turn lifecycle events (`agent_start`/`agent_end`-family) |
 | `permission.asked` | pi extension-UI sub-protocol (`extension_ui_request`/`extension_ui_response`) — semantics differ, map conservatively |
 | `session.error` | `extension_error`, RPC error responses |
+
+The asynchronous prompt route keeps its HTTP 204 contract. If prompt submission
+rejects, including a registry write before RPC dispatch, it emits `session.error`
+and appends an assistant error message to canonical session history. The error
+name and message are available through both SSE and the message GET route; a
+failed disk write does not depend on another successful disk write to report
+the failure. These adapter-authored error cards have the in-memory retention
+described above, not restart durability.
+
+### Shutdown ownership
+
+The connector owns its per-session RPC process groups. It also owns detached
+task-host shards for parent sessions it **created**, including forks. It does
+not claim task hosts for sessions discovered/restored from another OmO client.
+The registry saves `connectorOwned: true` for new sessions and forks so this
+ownership survives connector restart. Unmarked legacy/discovered sessions are
+not retroactively claimed.
+Created session IDs remain tracked after removal or idle reaping, so their
+private hosts are still covered by final connector shutdown.
+
+This is a split ownership decision based on the installed OmO implementation
+inspected on October 13, 2026:
+
+- `omo-ai/plugin/extensions/omo-task.js`, bundled functions `P2`, `A2`, `nI`
+  and `bq`: a root task shard is `p-<key>.sock`, where `key` is the first
+  16 hex characters of SHA-256 of `"p:" + parentSessionId`. Nested children
+  inherit `shard_key` and attach to that same parent tree. Independent parent
+  sessions get different shards, even within one project. The sidecar records
+  `owner_session_id`, `owner_session_file` and participating task stores.
+- `@code-yeongyu/senpi/dist/modes/rpc/host-ensure-start.js:51-64` detaches
+  the supervisor. `host-lifecycle.js:362-393` spawns its engine without
+  detaching it again; both therefore belong to the supervisor's process group.
+  `host-lifecycle-policy.js:1-7` defines the default 15-minute idle window.
+  The general host mechanism can serve multiple clients; that alone does not
+  make a connector-created parent shard shared with unrelated parent sessions.
+- `omo-ai/plugin/runtime/lsp-daemon/dist/paths.js:43-66` keys the LSP
+  endpoint by HOME (or its explicit daemon-directory override) and package
+  version, not by a session or project. `request-routing.js:12-29,70-81`
+  supplies per-request context to the same daemon.
+  `ensure-daemon.js:22-36,100-122` probes/reuses it and detaches only on
+  startup. Killing it would interrupt other OmO sessions/projects.
+  `daemon-server.js:11-15,74-89` actually specifies **30 idle minutes**,
+  with connections and LSP clients preventing expiry. It is not the task
+  supervisor's 15-minute policy. `index.js:565-582` also detaches the daemon's
+  language servers; their observed parent ancestry, not just one process group,
+  establishes that they belong to the same shared LSP infrastructure.
+
+After its RPC groups stop, the connector finds private supervisors by the
+exact shard basename derived from a newly created session ID plus that
+session's working directory. It requires a detached group leader and records
+Linux PID start times before signalling that group. Shutdown subscribes to
+member death, sends SIGTERM, and escalates after five seconds with a ten-second
+deadline. It refuses to signal any observed member of `openchamber.service`.
+No broad command-line kill is used. The real-process regression proves that a
+different session's supervisor and engine in the same directory stay alive.
+Linux `/proc` and GNU `tail --pid` are required for this deployment's teardown.
+
+The smoke assertion runs **before any harness termination**. Surviving RPC
+groups, private task hosts and unknown processes fail immediately. Only the
+shared LSP daemon and its observed descendants, outside recorded RPC groups, are reported as
+`NON-CONNECTOR OmO-owned, outside connector scope`, with PID and command line.
+That report is not evidence of connector teardown. The harness later cleans
+its private HOME's helpers in its separate `finally` cleanup; cleanup can
+never turn a failed shutdown assertion into a PASS.
 
 ### User shell cancellation and extension commands
 

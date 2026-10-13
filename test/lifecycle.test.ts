@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -79,6 +80,44 @@ test("dispose terminates the process group and is idempotent", { timeout: 15_000
   await Promise.all([pi.dispose(), pi.dispose(), exited]);
   gone(before.pid);
   gone(before.childPid);
+});
+
+for (const restarted of [false, true]) test(`F2 B4 shutdown owns private session shards${restarted ? " after restart" : ""} but leaves another session host alive`, { timeout: 20_000 }, async (t) => {
+  const { manager: initial, store, dir } = setup(t);
+  let manager = initial;
+  const info = await manager.create(dir);
+  const sessionId = manager.get(info.id)?.piSessionId;
+  assert.ok(sessionId);
+  if (restarted) {
+    await initial.disposeAll();
+    manager = new SessionManager(() => undefined, store, dir);
+    t.after(() => manager.disposeAll());
+    assert.ok(manager.get(info.id), "restore the connector-created session from its registry");
+  }
+  const hosts = [];
+  for (const ownerId of [sessionId, randomUUID()]) {
+    const key = createHash("sha256").update(`p:${ownerId}`).digest("hex").slice(0, 16);
+    const child = spawn(process.execPath, [
+      resolve("test/fixtures/fake-omo-host.mjs"), "--internal-rpc-host-supervisor",
+      "--socket", join(dir, `p-${key}.sock`),
+    ], { cwd: dir, detached: true, stdio: ["ignore", "pipe", "ignore"] });
+    const exited = once(child, "exit");
+    t.after(async () => {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+      await exited;
+    });
+    assert.ok(child.stdout);
+    const [output] = await once(child.stdout, "data", { signal: deadline() });
+    const identity: { pid: number; enginePid: number } = JSON.parse(String(output));
+    hosts.push(identity);
+  }
+  const [owned, unrelated] = hosts;
+  assert.ok(owned && unrelated);
+  await manager.disposeAll();
+  gone(owned.pid);
+  gone(owned.enginePid);
+  assert.doesNotThrow(() => process.kill(unrelated.pid, 0), "another OmO session's host must remain alive");
+  assert.doesNotThrow(() => process.kill(unrelated.enginePid, 0));
 });
 
 test("hung OmO receives SIGKILL at the injected five second deadline", { timeout: 15_000 }, async (t) => {

@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test, { type TestContext } from "node:test";
 import { AdapterServer } from "../src/server.js";
+import type { PiRpcClient } from "../src/pi-rpc.js";
+import { SessionPersistenceError, SessionStore } from "../src/session-store.js";
 
 const fakeRpc = resolve("test/fixtures/fake-omo-endpoints.mjs");
 const unsupportedShare = { name: "BadRequestError", data: { message: "Sharing is not available with OmO" } };
@@ -358,6 +360,98 @@ test("abort without a running shell is a no-op", { timeout: 30_000 }, async (t) 
   assert.equal(await response.json(), true);
   assert.deepEqual(server["sessions"].messages(sessionId), before);
   assert.equal(server["sessions"].get(sessionId)?.status.type, "idle");
+});
+
+test("F2 B5 abort cancels a queued shell before the preceding refresh completes", { timeout: 10_000 }, async (t) => {
+  const { url, server } = await startServer(t);
+  const sessionId = await createSession(url);
+  const manager = server["sessions"];
+  const pi = manager.get(sessionId)?.pi;
+  assert.ok(pi);
+  const command = pi.command.bind(pi);
+  const held = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const commands: string[] = [];
+  pi.command = async <T>(...args: Parameters<PiRpcClient["command"]>) => {
+    commands.push(String(args[0].type));
+    const response = await command<T>(...args);
+    if (args[0].type === "get_entries") {
+      held.resolve();
+      await release.promise;
+    }
+    return response;
+  };
+  const stream = startEvents(url);
+  t.after(stream.close);
+  await stream.ready;
+  const refresh = manager.reloadMessages(sessionId);
+  await held.promise;
+  const running = stream.waitFor("message.part.updated", (event) =>
+    JSON.stringify(event).includes('"status":"running"'));
+  const shell = fetch(`${url}/session/${sessionId}/shell`, {
+    method: "POST", body: JSON.stringify({ command: "echo NEVER_DISPATCH" }),
+    signal: AbortSignal.timeout(2_000),
+  });
+  try {
+    await running;
+    const started = performance.now();
+    assert.equal((await fetch(`${url}/session/${sessionId}/abort`, { method: "POST" })).status, 200);
+    const response = await shell;
+    assert.equal(response.status, 200);
+    assert.ok(performance.now() - started < 2_000);
+    assert.equal(manager.get(sessionId)?.status.type, "idle");
+    const parts = manager.messages(sessionId)?.flatMap((message) => message.parts) ?? [];
+    assert.ok(parts.some((part) => part.type === "tool" && part.state.status === "error" &&
+      part.state.metadata?.cancelled === true));
+    assert.equal(commands.includes("bash"), false);
+  } finally {
+    release.resolve();
+    await refresh;
+    await manager["operations"].get(sessionId);
+    pi.command = command;
+  }
+  assert.equal(commands.includes("bash"), false, "cancelled queue entries must never dispatch later");
+  assert.equal((await fetch(`${url}/session/${sessionId}/shell`, {
+    method: "POST", body: JSON.stringify({ command: "echo RESUMED" }),
+  })).status, 200);
+});
+
+test("F2 B3 async prompt registry failure emits an error and retains visible failed state", { timeout: 15_000 }, async (t) => {
+  const { url, server } = await startServer(t);
+  const sessionId = await createSession(url);
+  const manager = server["sessions"];
+  const pi = manager.get(sessionId)?.pi;
+  assert.ok(pi);
+  // Use the real failing filesystem boundary, not a mocked rejection.
+  Object.defineProperty(manager, "store", { value: new SessionStore("/dev/null/F2-registry-failure") });
+  const commands: string[] = [];
+  const command = pi.command.bind(pi);
+  pi.command = <T>(...args: Parameters<PiRpcClient["command"]>) => {
+    commands.push(String(args[0].type));
+    return command<T>(...args);
+  };
+  const stream = startEvents(url);
+  t.after(stream.close);
+  await stream.ready;
+  const error = stream.waitFor("session.error", (event) => event.properties?.sessionID === sessionId);
+  void error.catch(() => undefined);
+  const response = await fetch(`${url}/session/${sessionId}/prompt_async`, {
+    method: "POST", body: JSON.stringify({ messageID: "msg_failed_prompt", parts: [{ type: "text", text: "P3" }] }),
+  });
+  assert.equal(response.status, 204);
+  await manager["operations"].get(sessionId);
+  assert.equal(commands.includes("prompt"), false);
+  // The direct control must still propagate the same essential write failure.
+  await assert.rejects(manager.prompt(sessionId, "P3 control"), SessionPersistenceError);
+  const event = await error;
+  assert.ok(isRecord(event.properties?.error));
+  assert.equal(event.properties.error.name, "SessionPersistenceError");
+  const history: unknown = await fetch(`${url}/session/${sessionId}/message`).then((res) => res.json());
+  assert.ok(Array.isArray(history));
+  assert.ok(history.some((message) => isRecord(message) && isRecord(message.info) &&
+    message.info.role === "assistant" && isRecord(message.info.error) &&
+    message.info.error.name === "SessionPersistenceError"));
+  assert.equal(manager.get(sessionId)?.status.type, "idle");
 });
 
 test("a print-only slash command renders its notification and returns idle without agent events", { timeout: 30_000 }, async (t) => {

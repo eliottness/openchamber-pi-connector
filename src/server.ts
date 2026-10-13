@@ -12,6 +12,7 @@ import { ApprovalInputError, toV2Permission } from "./approvals.js";
 import type { TodoUpdated } from "./todo-bridge.js";
 import { getAgentName, getExposedAgentNames } from "./agent-name.js";
 import { loadCatalog, type Catalog } from "./catalog.js";
+import type { ModelSelection } from "./thinking-levels.js";
 import {
   announceSessionError,
   compactSession,
@@ -58,11 +59,12 @@ function numberParam(value: string | null): number | undefined {
 }
 
 /** v2 prompt bodies carry `model:{providerID, id|modelID}`; adapt to OCModelRef. */
-function modelRefFromBody(model: { providerID?: string; id?: string; modelID?: string } | undefined): OCModelRef | undefined {
+function modelRefFromBody(model: { providerID?: string; id?: string; modelID?: string; variant?: string } | undefined, variant?: string): ModelSelection | undefined {
   if (!model || typeof model.providerID !== "string") return undefined;
   const modelID = typeof model.id === "string" ? model.id : typeof model.modelID === "string" ? model.modelID : undefined;
   if (modelID === undefined) return undefined;
-  return { providerID: model.providerID, modelID };
+  const level = variant ?? model.variant;
+  return { providerID: model.providerID, modelID, ...(typeof level === "string" ? { variant: level } : {}) };
 }
 
 export interface AdapterServerOptions {
@@ -283,12 +285,13 @@ export class AdapterServer {
           this.json(res, 200, this.sessions.todos(sessionId!));
           return;
         case "POST /prompt_async": {
-          const body = (await this.body(req)) as OCPromptBody;
+          const body = (await this.body(req)) as OCPromptBody & { variant?: string };
           const text = (body.parts ?? [])
             .filter((p) => p.type === "text" && typeof p.text === "string")
             .map((p) => p.text ?? "")
             .join("\n");
-          void this.sessions.prompt(sessionId, text, body.model, body.noReply, body.messageID).catch((error: unknown) => {
+          const model = modelRefFromBody(body.model ?? (body.variant !== undefined ? managed.model : undefined), body.variant);
+          void this.sessions.prompt(sessionId, text, model, body.noReply, body.messageID).catch((error: unknown) => {
             announceSessionError(
               { sessions: this.sessions, session: managed, emit: this.broadcast.bind(this) },
               error instanceof Error ? error.name : "UnknownError",
@@ -299,12 +302,13 @@ export class AdapterServer {
           return;
         }
         case "POST /message": {
-          const body = (await this.body(req)) as OCPromptBody;
+          const body = (await this.body(req)) as OCPromptBody & { variant?: string };
           const text = (body.parts ?? [])
             .filter((p) => p.type === "text" && typeof p.text === "string")
             .map((p) => p.text ?? "")
             .join("\n");
-          await this.sessions.prompt(sessionId, text, body.model, body.noReply, body.messageID);
+          const model = modelRefFromBody(body.model ?? (body.variant !== undefined ? managed.model : undefined), body.variant);
+          await this.sessions.prompt(sessionId, text, model, body.noReply, body.messageID);
           const msgs = this.sessions.messages(sessionId) ?? [];
           this.json(res, 200, msgs[msgs.length - 1] ?? null);
           return;
@@ -924,12 +928,13 @@ export class AdapterServer {
           const body = (await this.body(req)) as {
             id?: string;
             text?: string;
-            model?: { providerID?: string; id?: string; modelID?: string };
+            model?: { providerID?: string; id?: string; modelID?: string; variant?: string };
+            variant?: string;
             delivery?: string;
           };
           const text = typeof body.text === "string" ? body.text : "";
           const messageID = typeof body.id === "string" && body.id !== "" ? body.id : `msg_${randomUUID().replaceAll("-", "")}`;
-          const model = modelRefFromBody(body.model);
+          const model = modelRefFromBody(body.model ?? (body.variant !== undefined ? managed.model : undefined), body.variant);
           void this.sessions.prompt(sessionId, text, model, false, messageID).catch((err) => {
             console.error(`[prompt] session ${sessionId} failed:`, err);
           });
@@ -963,8 +968,8 @@ export class AdapterServer {
           // to pi. Dropping the body used to leave the UI showing a model pi
           // never ran. 204 empty is the contract; 400/404 are the statuses the
           // client declares, and a loud failure beats a silent drift.
-          const body = (await this.body(req)) as { model?: { providerID?: string; id?: string; modelID?: string } };
-          const ref = modelRefFromBody(body.model);
+          const body = (await this.body(req)) as { model?: { providerID?: string; id?: string; modelID?: string; variant?: string }; variant?: string };
+          const ref = modelRefFromBody(body.model, body.variant);
           if (ref === undefined) {
             this.json(res, 400, { error: "model is required: {providerID, modelID}" });
             return;

@@ -5,8 +5,9 @@
  */
 
 import { PiRpcClient } from "./pi-rpc.js";
+import { thinkingVariants, type ThinkingModel } from "./thinking-levels.js";
 
-interface PiModelInfo {
+interface PiModelInfo extends ThinkingModel {
   id: string;
   provider: string;
   name?: string;
@@ -35,6 +36,7 @@ interface OCv2Model {
   cost: { input: number; output: number; cache: { read: number; write: number } };
   limit: { context: number; output: number };
   options: Record<string, unknown>;
+  variants?: Record<string, Record<string, unknown>>;
 }
 
 export interface OCv2Provider {
@@ -62,6 +64,7 @@ export interface Catalog {
 function toOCModel(m: PiModelInfo): OCv2Model {
   const inputs = new Set(m.input ?? ["text"]);
   const modality = (name: string): boolean => inputs.has(name);
+  const variants = thinkingVariants(m);
   return {
     id: m.id,
     providerID: m.provider,
@@ -83,6 +86,7 @@ function toOCModel(m: PiModelInfo): OCv2Model {
     },
     limit: { context: m.contextWindow ?? 0, output: m.maxTokens ?? 0 },
     options: {},
+    ...(variants !== undefined ? { variants } : {}),
   };
 }
 

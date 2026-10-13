@@ -8,6 +8,7 @@ import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from "nod
 import { join } from "node:path";
 import { PiRpcClient, type PiRpcCommand, type PiRpcResponse } from "./pi-rpc.js";
 import { stopSessionHosts } from "./session-hosts.js";
+import { setThinkingLevel, type ModelSelection, type ThinkingState } from "./thinking-levels.js";
 import { SessionLifecycle, type LifecycleOptions } from "./lifecycle.js";
 import { ApprovalBridge, extensionUiRequestFrom, type PendingPermission, type PendingQuestion } from "./approvals.js";
 import { getAgentName } from "./agent-name.js";
@@ -47,7 +48,7 @@ interface StreamingState {
   parts: Map<number, OCPart>;
 }
 
-export interface ManagedSession {
+export interface ManagedSession extends ThinkingState {
   tree: SessionTreeState;
   info: OCSession;
   /** undefined while dormant (restored from disk, no pi process spawned yet). */
@@ -94,6 +95,7 @@ interface PiState {
   sessionId: string;
   sessionFile?: string;
   isStreaming: boolean;
+  thinkingLevel?: string;
 }
 
 /**
@@ -176,6 +178,7 @@ export class SessionManager {
       hasPendingInteraction: () => false,
       hasRunningChildren: () => false,
       ...(piSessionId !== undefined ? { piSessionId } : {}),
+      ...(state.data.thinkingLevel !== undefined ? { thinkingLevel: state.data.thinkingLevel } : {}),
     };
     managed.approvals = this.approvalsFor(managed);
     this.sessions.set(info.id, managed);
@@ -606,13 +609,13 @@ export class SessionManager {
    * from the bottom-right picker to pi. Errors are deliberately not swallowed:
    * a silent no-op is exactly what let the UI and pi disagree about the model.
    */
-  async setModel(sessionId: string, ref: OCModelRef): Promise<OCModelRef> {
+  async setModel(sessionId: string, ref: ModelSelection): Promise<OCModelRef> {
     const s = this.get(sessionId);
     if (s === undefined) throw new Error(`unknown session: ${sessionId}`);
     return this.lifecycle.use(s, () => this.setModelLive(s, ref));
   }
 
-  private async setModelLive(s: ManagedSession, ref: OCModelRef): Promise<OCModelRef> {
+  private async setModelLive(s: ManagedSession, ref: ModelSelection): Promise<OCModelRef> {
     const sessionId = s.info.id;
     if (s.pi === undefined) await this.revive(s);
     const pi = s.pi;
@@ -620,6 +623,7 @@ export class SessionManager {
     // The client re-sends its selection on every send; an unchanged model must
     // not cost a round-trip nor emit a phantom "model switched" marker.
     if (s.model !== undefined && s.model.providerID === ref.providerID && s.model.modelID === ref.modelID) {
+      await setThinkingLevel(s, pi, ref.variant);
       return s.model;
     }
     const res = await pi.command<{ provider?: string; id?: string; responseModel?: string }>({
@@ -628,6 +632,13 @@ export class SessionManager {
       modelId: ref.modelID,
     });
     if (!res.success) throw new Error(res.error ?? `pi refused model ${ref.providerID}/${ref.modelID}`);
+    // set_model may clamp thinking to the new model's supported range.
+    delete s.thinkingLevel;
+    if (ref.variant !== undefined) {
+      const state = await pi.command<PiState>({ type: "get_state" });
+      if (!state.success || !state.data) throw new Error(state.error ?? "pi returned no state after model switch");
+      if (state.data.thinkingLevel !== undefined) s.thinkingLevel = state.data.thinkingLevel;
+    }
     // pi's response is the authority, not the request: it echoes the resolved
     // Model, including `responseModel` when the provider named a concrete one.
     const data = res.data;
@@ -641,6 +652,7 @@ export class SessionManager {
             : ref.modelID,
     };
     this.applyPiModel(s, resolved.providerID, resolved.modelID);
+    await setThinkingLevel(s, pi, ref.variant);
     return resolved;
   }
 
@@ -663,13 +675,13 @@ export class SessionManager {
     return true;
   }
 
-  async prompt(sessionId: string, text: string, model?: OCModelRef, noReply = false, messageID?: string): Promise<void> {
+  async prompt(sessionId: string, text: string, model?: ModelSelection, noReply = false, messageID?: string): Promise<void> {
     const s = this.get(sessionId);
     if (!s) throw new Error(`unknown session: ${sessionId}`);
     return this.operation(s, () => this.promptLive(s, text, model, noReply, messageID));
   }
 
-  private async promptLive(s: ManagedSession, text: string, model?: OCModelRef, noReply = false, messageID?: string): Promise<void> {
+  private async promptLive(s: ManagedSession, text: string, model?: ModelSelection, noReply = false, messageID?: string): Promise<void> {
     const sessionId = s.info.id;
     if (s.pi === undefined) await this.revive(s);
     const pi = s.pi;
@@ -818,6 +830,16 @@ export class SessionManager {
       await pi.dispose();
       throw new Error(`pi get_state failed on resume: ${state.error ?? "no data"}`);
     }
+    // --session normally restores thinking from JSONL. Reapply when a profile
+    // or runtime default overrides it, before admitting any prompt.
+    const thinking: ThinkingState = state.data.thinkingLevel === undefined ? {} : { thinkingLevel: state.data.thinkingLevel };
+    try {
+      await setThinkingLevel(thinking, pi, s.thinkingLevel);
+    } catch (error) {
+      await pi.dispose();
+      throw error;
+    }
+    if (thinking.thinkingLevel !== undefined) s.thinkingLevel = thinking.thinkingLevel;
     s.pi = pi;
     this.lifecycle.touch(s);
     s.piPath = restored.piPath;

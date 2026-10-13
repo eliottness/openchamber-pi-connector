@@ -38,6 +38,14 @@ process.on("SIGINT", () => stop());
 const input = createInterface({ input: process.stdin });
 input.on("close", () => stop(true));
 let model = { provider: "fake", id: "fake-model" };
+let thinkingLevel = "medium";
+let thinkingCalls = 0;
+const thinkingModels = [
+  { provider: "fake", id: "fake-model", reasoning: true, supportedThinkingLevels: ["off", "low", "medium", "high"] },
+  { provider: "fake", id: "mapped", reasoning: true, thinkingLevelMap: { off: null, minimal: null, low: "low", high: "high" } },
+  { provider: "fake", id: "plain", reasoning: false, supportedThinkingLevels: ["off"] },
+  { provider: "fake", id: "unknown", reasoning: true },
+];
 const record = (role, text) => {
   const entry = { type: "message", id: randomUUID(), parentId: leaf, timestamp: Date.now(),
     message: { role, content: [{ type: "text", text }], provider: model.provider, model: model.id } };
@@ -84,7 +92,18 @@ input.on("line", (line) => {
     writeFileSync(sessionFile, records.map((r) => JSON.stringify(r)).join("\n") + "\n");
     data = { cancelled: false };
   }
-  if (command.type === "get_state") data = { model, sessionId: header.id, sessionFile, isStreaming: false,
+  if (command.type === "get_available_models") data = { models: thinkingModels };
+  if (command.type === "set_thinking_level") {
+    thinkingCalls++;
+    if (command.level === "max") {
+      send({ type: "response", id: command.id, command: command.type, success: false, error: "unsupported thinking level" });
+      return;
+    }
+    thinkingLevel = command.level === "minimal" ? "low" : command.level;
+    appendFileSync(sessionFile, JSON.stringify({ type: "thinking_level_change", thinkingLevel }) + "\n");
+    send({ type: "thinking_level_changed", level: thinkingLevel });
+  }
+  if (command.type === "get_state") data = { model, thinkingLevel, thinkingCalls, sessionId: header.id, sessionFile, isStreaming: false,
     pid: process.pid, childPid: child.pid, resumed: resumeIndex !== -1, history: readFileSync(sessionFile, "utf8") };
   if (command.type === "set_model") {
     model = { provider: command.provider, id: command.modelId };

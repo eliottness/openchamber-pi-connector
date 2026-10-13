@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { once } from "node:events";
 import { mkdtempSync, readFileSync, rmSync, watch, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -102,7 +103,7 @@ test("shell identity is durable while a persisted native response is held", { ti
   }
 });
 
-test("a cold restore keeps a running shell identity without inventing a native result", { timeout: 30_000 }, async (t) => {
+test("a cold restore keeps only the identity admission when no native shell result exists", { timeout: 30_000 }, async (t) => {
   const { manager, dir, state } = setup(t);
   const { s, id } = await turns(manager, dir);
   assert.ok(s.pi);
@@ -122,8 +123,9 @@ test("a cold restore keeps a running shell identity without inventing a native r
     const cold = new SessionManager(() => {}, new SessionStore(state), dir);
     t.after(() => cold.disposeAll());
     const restored = cold.messages(id)?.find((message) => message.info.id === live.info.id);
-    assert.ok(restored?.parts[0]?.type === "tool" && restored.parts[0].state.status === "error");
-    assert.equal(restored.parts[0].state.metadata?.interrupted, true);
+    assert.equal(restored, undefined);
+    const parentID = live.info.parentID;
+    assert.equal(cold.messages(id)?.some((message) => message.info.id === parentID), false);
     assert.equal(cold.get(id)?.tree.messageEntries[live.info.id], undefined);
     assert.ok(new SessionStore(state).get(id)?.tree?.localShellTurns?.some((turn) => turn.messages[1].info.id === live.info.id));
   } finally {
@@ -131,6 +133,77 @@ test("a cold restore keeps a running shell identity without inventing a native r
     await pending;
     await finished.promise;
   }
+});
+
+async function crashDispatchedShell(t: TestContext) {
+  const { manager, dir, state } = setup(t);
+  const { s, id } = await turns(manager, dir);
+  assert.ok(s.pi);
+  execFileSync("mkfifo", [join(dir, "lost-gate")]);
+  const started = Promise.withResolvers<void>();
+  s.pi.onEvent((event) => { if (event.type === "fake_bash_started") started.resolve(); });
+  const pending = runShellCommand({ sessions: manager, session: s, command: "IFS= read -r x < lost-gate; echo unavailable-outcome", emit: () => {} })
+    .then((result) => ({ result }), (error: unknown) => ({ error }));
+  await started.promise;
+  const shell = s.messages?.at(-1)?.info;
+  assert.ok(shell?.role === "assistant");
+  const saved = new SessionStore(state).get(id);
+  assert.ok(saved);
+  const snapshot = new SessionStore(join(dir, "cold-state"));
+  snapshot.set(id, saved);
+  const rpcPID = s.pi.pid;
+  assert.ok(rpcPID);
+  const bashPID = Number(execFileSync("pgrep", ["-P", String(rpcPID), "-x", "bash"], { encoding: "utf8" }).trim());
+  assert.ok(bashPID > 0);
+  const exited = once(s.pi, "exit", { signal: AbortSignal.timeout(10_000) });
+  process.kill(-rpcPID, "SIGKILL");
+  process.kill(-bashPID, "SIGKILL");
+  await exited;
+  await pending;
+  await manager.disposeAll();
+  const cold = new SessionManager(() => {}, snapshot, dir);
+  t.after(() => cold.disposeAll());
+  return { cold, dir, id, shell, snapshot };
+}
+
+test("an unresolved dispatched admission cannot abort the next admitted prompt", { timeout: 30_000 }, async (t) => {
+  const { cold, id } = await crashDispatchedShell(t);
+  cold.messages(id);
+  await cold.reloadMessages(id);
+  const session = cold.get(id);
+  assert.ok(session?.pi);
+  const pi = session.pi;
+  const original = pi.command.bind(pi);
+  t.mock.method(pi, "command", async <T>(...args: Parameters<PiRpcClient["command"]>) => {
+    if (args[0].type === "switch_session") await original({ type: "abort" });
+    return original<T>(...args);
+  });
+  await cold.prompt(id, "pending-turn", undefined, false, "msg_followup");
+  assert.equal(session.status.type, "busy", "a read/sync must not abort an admitted native turn");
+  const finished = Promise.withResolvers<void>();
+  pi.onEvent((event) => { if (event.type === "agent_idle") finished.resolve(); });
+  await pi.command({ type: "finish_pending_turn" });
+  await finished.promise;
+  const reply = cold.messages(id)?.find((message) => message.info.role === "assistant" && message.info.parentID === "msg_followup");
+  assert.ok(reply?.parts.some((part) => part.type === "text" && part.text === "completed followup"));
+  assert.equal(session.status.type, "idle");
+});
+
+test("an abandoned dispatched admission never returns after replacement refresh or restart", { timeout: 30_000 }, async (t) => {
+  const { cold, dir, id, shell, snapshot } = await crashDispatchedShell(t);
+  cold.messages(id);
+  await cold.revert(id, "msg_live_2");
+  await cold.prompt(id, "replacement", undefined, false, "msg_replacement");
+  assert.equal(cold.messages(id)?.some((message) => message.info.id === shell.id || message.info.id === shell.parentID), false);
+  await cold.reloadMessages(id);
+  assert.equal(cold.messages(id)?.some((message) => message.info.id === shell.id || message.info.id === shell.parentID), false);
+  assert.equal(new SessionStore(snapshot.stateDir).get(id)?.tree?.localShellTurns?.some((turn) =>
+    turn.messages[1].info.id === shell.id), false);
+  await cold.disposeAll();
+  const restarted = new SessionManager(() => {}, new SessionStore(snapshot.stateDir), dir);
+  t.after(() => restarted.disposeAll());
+  assert.equal(restarted.messages(id)?.some((message) => message.info.id === shell.id || message.info.id === shell.parentID), false);
+  assert.ok(restarted.messages(id)?.some((message) => message.info.id === "msg_replacement"));
 });
 
 test("never dispatched shell attempts stay live but are absent from the registry and restart", async (t) => {
@@ -187,9 +260,14 @@ test("shutdown marks an active shell interrupted rather than rejected", { timeou
   const cold = new SessionManager(() => {}, new SessionStore(state), dir);
   t.after(() => cold.disposeAll());
   const restored = cold.messages(id)?.find((message) => message.info.id === shellID);
-  assert.ok(restored?.parts[0]?.type === "tool");
-  assert.ok(restored.parts[0].state.status === "completed" ||
-    (restored.parts[0].state.status === "error" && (restored.parts[0].state.metadata?.interrupted === true || restored.parts[0].state.metadata?.cancelled === true)));
+  const saved = new SessionStore(state).get(id);
+  assert.ok(saved);
+  const native = readFileSync(saved.piPath, "utf8").trim().split("\n").map((line) => JSON.parse(line))
+    .find((entry) => entry.message?.role === "bashExecution");
+  if (native) {
+    assert.ok(restored?.parts[0]?.type === "tool" && restored.parts[0].state.status === "error");
+    assert.equal(restored.parts[0].state.metadata?.cancelled, true);
+  } else assert.equal(restored, undefined);
 });
 
 test("a replacement prompt cannot resurrect ephemeral shell attempts through reload and restart", async (t) => {
@@ -336,8 +414,8 @@ test("an older cached ancestor cannot carry a later queued attempt across either
   assert.equal(cold.messages(info.id)?.some((message) => message.info.id === queued.info.id), false);
 });
 
-for (const action of ["refresh", "fork", "prewarmed", "notice"] as const) {
-  test(`an interrupted identity reconciles a late native result on warm ${action}`, { timeout: 30_000 }, async (t) => {
+for (const action of ["read", "refresh", "fork", "notice"] as const) {
+  test(`an invisible admission binds a later native result on normal ${action}`, { timeout: 30_000 }, async (t) => {
     const { manager, dir, state } = setup(t);
     const info = await manager.create(dir);
     await manager.prompt(info.id, "before", undefined, false, "msg_before");
@@ -357,12 +435,7 @@ for (const action of ["refresh", "fork", "prewarmed", "notice"] as const) {
     const cold = new SessionManager(() => {}, snapshot, dir);
     t.after(() => cold.disposeAll());
     const initial = cold.messages(info.id)?.find((message) => message.info.id === live.info.id);
-    assert.ok(initial?.parts[0]?.type === "tool" && initial.parts[0].state.status === "error");
-    assert.equal(initial.parts[0].state.metadata?.interrupted, true);
-    if (action === "prewarmed") {
-      await cold.reloadMessages(info.id);
-      assert.ok(cold.get(info.id)?.pi, "RPC must already be revived while the original writer is blocked");
-    }
+    assert.equal(initial, undefined);
     let noticeID: string | undefined;
     if (action === "notice") {
       const recovered = cold.get(info.id);
@@ -375,7 +448,7 @@ for (const action of ["refresh", "fork", "prewarmed", "notice"] as const) {
     const completed = await pending;
     assert.equal(completed.kind, "completed");
     if (action === "fork") await cold.fork(info.id, live.info.id);
-    else await cold.reloadMessages(info.id);
+    else if (action !== "read") await cold.reloadMessages(info.id);
     const restored = cold.messages(info.id)?.find((message) => message.info.id === live.info.id);
     assert.ok(restored?.parts[0]?.type === "tool" && restored.parts[0].state.status === "completed");
     assert.equal(restored.parts[0].state.output, "late-native\n");
@@ -383,15 +456,14 @@ for (const action of ["refresh", "fork", "prewarmed", "notice"] as const) {
     assert.equal(cold.messages(info.id)?.filter((message) => message.parts.some((part) =>
       part.type === "tool" && part.tool === "bash")).length, 1);
     if (noticeID) assert.ok(cold.messages(info.id)?.some((message) => message.info.id === noticeID));
-    if (action === "prewarmed") {
-      await cold.fork(info.id, live.info.id);
-      await cold.disposeAll();
-      const nextCold = new SessionManager(() => {}, new SessionStore(snapshot.stateDir), dir);
-      t.after(() => nextCold.disposeAll());
-      const next = nextCold.messages(info.id)?.find((message) => message.info.id === live.info.id);
-      assert.ok(next?.parts[0]?.type === "tool" && next.parts[0].state.status === "completed");
-      assert.equal(next.parts[0].state.output, "late-native\n");
-    }
+    assert.equal(new SessionStore(snapshot.stateDir).get(info.id)?.tree?.localShellTurns?.length, 0);
+    await cold.disposeAll();
+    const nextCold = new SessionManager(() => {}, new SessionStore(snapshot.stateDir), dir);
+    t.after(() => nextCold.disposeAll());
+    const next = nextCold.messages(info.id)?.find((message) => message.info.id === live.info.id);
+    assert.ok(next?.parts[0]?.type === "tool" && next.parts[0].state.status === "completed");
+    assert.equal(next.parts[0].state.output, "late-native\n");
+    await nextCold.fork(info.id, live.info.id);
   });
 }
 

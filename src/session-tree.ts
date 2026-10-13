@@ -7,7 +7,7 @@ export interface SessionTreeState {
   messageEntries: Record<string, string>;
   /** Actual transport dispatch, not inferred from a card's terminal state. */
   shellDispatch?: Record<string, boolean>;
-  /** Dispatched unresolved identities; afterEntryId guards native binding, not display order. */
+  /** Identity-only dispatched admissions; never rendered without a native entry. */
   localShellTurns?: Array<{ afterEntryId: string | null; messages: [OCMessageWithParts, OCMessageWithParts] }>;
   leafId?: string | null;
   revert?: { messageID: string; previousLeafId: string | null; targetId: string | null };
@@ -34,44 +34,12 @@ export interface Entries {
 
 export class SessionTreeError extends Error {}
 
-export function hasInterruptedShellTurn(s: ManagedSession): boolean {
-  return s.tree.localShellTurns?.some((turn) =>
-    s.tree.shellDispatch?.[turn.messages[1].info.id] === true &&
-    s.tree.messageEntries[turn.messages[1].info.id] === undefined &&
-    turn.messages[1].parts.some((part) => part.type === "tool" && part.state.status === "error" &&
-      part.state.metadata?.interrupted === true)) ?? false;
-}
-
 export function durableShellTree(tree: SessionTreeState): SessionTreeState {
   return {
     ...tree,
     shellDispatch: Object.fromEntries(Object.entries(tree.shellDispatch ?? {}).filter(([, dispatched]) => dispatched)),
     localShellTurns: (tree.localShellTurns ?? []).filter((turn) => tree.shellDispatch?.[turn.messages[1].info.id] === true),
   };
-}
-
-export function reconcileShellTurns(s: ManagedSession, tree: Entries): void {
-  const previous = s.messages;
-  s.messages ??= (s.tree.localShellTurns ?? []).flatMap((turn) => turn.messages);
-  for (const turn of s.tree.localShellTurns ?? []) {
-    for (const message of turn.messages) (s.localMessageIds ??= new Set()).add(message.info.id);
-  }
-  bindMessageEntries(s, tree);
-  s.messages = previous;
-  s.tree.localShellTurns = (s.tree.localShellTurns ?? []).filter((turn) => s.tree.messageEntries[turn.messages[1].info.id] === undefined);
-  if (!s.recoverShellTurns) return;
-  for (const turn of s.tree.localShellTurns ?? []) {
-    const assistant = turn.messages[1];
-    const part = assistant.parts[0];
-    if (assistant.info.role !== "assistant" || part?.type !== "tool" ||
-      (part.state.status !== "running" && part.state.status !== "pending")) continue;
-    const completed = Date.now();
-    part.state = {
-      status: "error", input: part.state.input, error: "Interrupted by restart", metadata: { interrupted: true },
-      time: { start: assistant.info.time.created, end: completed },
-    };
-    assistant.info.time.completed = completed;
-  }
 }
 
 export async function getEntries(pi: PiRpcClient, signal?: AbortSignal): Promise<Entries> {
@@ -104,15 +72,27 @@ export function branchEntries(tree: Entries, leafId = tree.leafId): TreeEntry[] 
 export function bindMessageEntries(s: ManagedSession, tree: Entries): void {
   const branch = branchEntries(tree, s.tree.revert ? s.tree.revert.previousLeafId : tree.leafId);
   const positions = new Map(branch.map((entry, index) => [entry.id, index]));
+  s.tree.localShellTurns = (s.tree.localShellTurns ?? []).filter((turn) => {
+    if (turn.afterEntryId === null || positions.has(turn.afterEntryId)) return true;
+    const ids = new Set(turn.messages.map((message) => message.info.id));
+    s.messages = s.messages?.filter((message) => !ids.has(message.info.id));
+    for (const message of turn.messages) s.localMessageIds?.delete(message.info.id);
+    if (s.tree.shellDispatch) delete s.tree.shellDispatch[turn.messages[1].info.id];
+    return false;
+  });
   const entries = branch.filter((entry) => entry.type === "message" && (entry.message?.role === "user" || entry.message?.role === "assistant" || entry.message?.role === "bashExecution"));
-  const messages = s.messages ?? [];
+  const visible = s.messages ?? [];
+  const visibleIds = new Set(visible.map((message) => message.info.id));
+  const candidates = s.tree.localShellTurns.flatMap((turn) => turn.messages).filter((message) => !visibleIds.has(message.info.id));
+  for (const message of candidates) (s.localMessageIds ??= new Set()).add(message.info.id);
+  const messages = [...visible, ...candidates];
   let cursor = 0;
   for (const entry of entries) {
     const shell = entry.message?.role === "bashExecution";
     const known = messages.findIndex((message) => (!shell || message.info.role === "assistant") &&
       s.tree.messageEntries[message.info.id] === entry.id);
     if (known >= 0) {
-      cursor = known + 1;
+      if (known < visible.length) cursor = known + 1;
       continue;
     }
     if (shell) {
@@ -148,7 +128,7 @@ export function bindMessageEntries(s: ManagedSession, tree: Entries): void {
           s.tree.messageEntries[message.info.id] = entry.id;
           s.localMessageIds?.delete(message.info.id);
         }
-        cursor = index + 1;
+        if (index < visible.length) cursor = index + 1;
       }
       continue;
     }
@@ -166,6 +146,7 @@ export function bindMessageEntries(s: ManagedSession, tree: Entries): void {
   // Syncs/agent events preserve an active revert's navigation pin. Only
   // revert/unrevert select it explicitly; prompt clears the pin before branching.
   if (!s.tree.revert) s.tree.leafId = tree.leafId;
+  s.tree.localShellTurns = s.tree.localShellTurns.filter((turn) => s.tree.messageEntries[turn.messages[1].info.id] === undefined);
 }
 
 export function entryForMessage(s: ManagedSession, tree: Entries, messageID: string): TreeEntry {

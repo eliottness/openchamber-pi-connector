@@ -65,12 +65,13 @@ input.on("line", (line) => {
   const command = JSON.parse(line);
   let data = {};
   if (command.type === "emit_event") send(command.event);
-  if (command.type === "switch_session") {
-    sessionFile = command.sessionPath;
-    records = readFileSync(sessionFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-    header = records[0];
-    leaf = records.filter((record) => record.type === "message").at(-1)?.id ?? null;
-    data = { cancelled: false };
+  if (command.type === "finish_pending_turn") {
+    const message = record("assistant", "completed followup");
+    send({ type: "message_start", message });
+    send({ type: "message_update", assistantMessageEvent: { type: "text_end", contentIndex: 0, content: message.content[0].text } });
+    send({ type: "message_end", message });
+    send({ type: "agent_end" });
+    send({ type: "agent_idle" });
   }
   if (command.type === "get_entries") data = { entries: records.filter((r) => r.type !== "session"), leafId: leaf };
   if (command.type === "get_tree") {

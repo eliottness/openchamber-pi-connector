@@ -14,7 +14,7 @@ import { ApprovalBridge, extensionUiRequestFrom, type PendingPermission, type Pe
 import { getAgentName } from "./agent-name.js";
 import { applyProviderToolResults, finishProviderToolParts, mapTool, providerToolParts, resultMetadata, resultText } from "./tool-map.js";
 import { TodoBridge, type Todo, type TodoUpdated } from "./todo-bridge.js";
-import { bindMessageEntries, durableShellTree, forkConversation, getEntries, hasInterruptedShellTurn, navigate, reconcileShellTurns, recordTurn, revertConversation, revertNotice, SessionTreeError, unrevertConversation, type Entries, type TreeEntry, type SessionTreeState } from "./session-tree.js";
+import { bindMessageEntries, durableShellTree, forkConversation, getEntries, navigate, recordTurn, revertConversation, revertNotice, SessionTreeError, unrevertConversation, type Entries, type TreeEntry, type SessionTreeState } from "./session-tree.js";
 import { SubagentBridge, taskParts, updateTaskParts, taskCompletions } from "./subagents.js";
 import { sessionDiff, touchedFiles } from "./session-diff.js";
 import { announceSessionNotice, shellTitle, shellUserMessage } from "./session-commands.js";
@@ -57,8 +57,6 @@ export interface ManagedSession extends ThinkingState {
   messages: OCMessageWithParts[] | undefined;
   /** Adapter-authored notices/errors remain local; persisted shell cards can be bound. */
   localMessageIds?: Set<string>;
-  /** Cold-adopted unresolved turns need native reconciliation before rendering. */
-  recoverShellTurns?: boolean;
   status: OCSessionStatus;
   /** undefined while dormant; resolved via get_state on create/revive. */
   model: OCModelRef | undefined;
@@ -339,7 +337,7 @@ export class SessionManager {
   messages(sessionId: string): OCMessageWithParts[] | undefined {
     const s = this.get(sessionId);
     if (!s) return undefined;
-    const messages = this.ensureMessages(s);
+    const messages = s.tree.localShellTurns?.length ? this.refreshMessageCache(s) : this.ensureMessages(s);
     // OpenChamber also hydrates the panel through SSE when reopening history.
     if (s.todoBridge !== undefined) {
       this.emit(s.info.directory, { type: "todo.updated", properties: { sessionID: s.info.id, todos: s.todoBridge.todos } });
@@ -375,10 +373,11 @@ export class SessionManager {
   private async syncTree(s: ManagedSession) {
     const pi = s.pi;
     if (!pi) throw new SessionTreeError("Session has no OmO process");
-    if (hasInterruptedShellTurn(s)) await this.reloadMessagesLive(s);
     this.ensureMessages(s);
+    const admissions = s.tree.localShellTurns?.length;
     const tree = await getEntries(pi);
     bindMessageEntries(s, tree);
+    if (admissions) this.refreshMessageCache(s);
     this.persistMeta(s);
     return tree;
   }
@@ -465,15 +464,9 @@ export class SessionManager {
   private async reloadMessagesLive(s: ManagedSession, signal?: AbortSignal): Promise<OCMessageWithParts[]> {
     const sessionId = s.info.id;
     signal?.throwIfAborted();
-    const alreadyLive = s.pi !== undefined;
     if (!s.pi) await this.revive(s);
     const pi = s.pi;
     if (!pi) throw new SessionTreeError("Session cannot be resumed");
-    if (alreadyLive && hasInterruptedShellTurn(s) && !s.tree.revert && s.piPath) {
-      // Another writer can have appended after revival; reopen before binding or selecting its leaf.
-      const response = await pi.command<{ cancelled?: boolean }>({ type: "switch_session", sessionPath: s.piPath }, 60_000, signal);
-      if (!response.success || response.data?.cancelled) throw new SessionTreeError(response.error ?? "Session refresh was cancelled");
-    }
     const tree = await getEntries(pi, signal);
     signal?.throwIfAborted();
     bindMessageEntries(s, tree);
@@ -706,6 +699,7 @@ export class SessionManager {
       this.removeRevertNotice(s, revertNotice(s));
       delete s.tree.revert;
       delete s.info.revert;
+      bindMessageEntries(s, await getEntries(pi));
       this.persistMeta(s);
       this.emit(s.info.directory, { type: "session.updated", properties: { info: s.info } });
     }
@@ -836,8 +830,7 @@ export class SessionManager {
     const restored = s.restored;
     if (restored === undefined) throw new Error(`session is not restorable: ${s.info.id}`);
     if (!existsSync(restored.piPath)) throw new Error(`pi session file is gone: ${restored.piPath}`);
-    if (hasInterruptedShellTurn(s)) this.refreshMessageCache(s);
-    else if (s.recoverShellTurns) this.ensureMessages(s);
+    this.ensureMessages(s);
     await this.lifecycle.makeRoom();
     const pi = new PiRpcClient({ cwd: s.info.directory, args: ["--session", restored.piPath], clock: this.lifecycle.clock });
     const state = await pi.command<PiState>({ type: "get_state" }).catch(async (error: unknown) => {
@@ -862,13 +855,14 @@ export class SessionManager {
     this.lifecycle.touch(s);
     s.piPath = restored.piPath;
     s.piSessionId = restored.piSessionId;
+    bindMessageEntries(s, await getEntries(pi));
     if (s.tree.leafId !== undefined) s.tree.leafId = await navigate(pi, s.tree.leafId);
     delete s.restored;
     s.approvals = this.approvalsFor(s);
     // A restored session pushes pi's real model to the UI rather than leaving
     // the picker on whatever it last showed for this directory.
     this.applyPiModel(s, state.data.model?.provider, state.data.model?.id);
-    this.ensureMessages(s);
+    this.refreshMessageCache(s);
     this.wirePi(s, pi);
     this.persistMeta(s);
   }
@@ -876,13 +870,10 @@ export class SessionManager {
   private ensureMessages(s: ManagedSession): OCMessageWithParts[] {
     if (this.subagents.owns(s.info.id)) return this.subagents.messages(s.info.id);
     if (s.messages === undefined) {
-      const recovering = s.recoverShellTurns;
+      const admissions = s.tree.localShellTurns?.length;
       s.messages = parsePiSessionFile(s, getAgentName());
       this.subagents.discover(s, s.messages);
-      if (recovering) {
-        delete s.recoverShellTurns;
-        this.persistMeta(s);
-      }
+      if (admissions) this.persistMeta(s);
     }
     return s.messages;
   }
@@ -895,9 +886,7 @@ export class SessionManager {
       const restored = parsed.get(message.info.id);
       parsed.delete(message.info.id);
       if (!restored) return s.tree.messageEntries[message.info.id] === undefined ? [message] : [];
-      const interrupted = message.parts.some((part) => part.type === "tool" && part.state.status === "error" &&
-        part.state.metadata?.interrupted === true);
-      return [interrupted && s.tree.messageEntries[message.info.id] !== undefined ? restored : message];
+      return [message];
     });
     s.messages.push(...parsed.values());
     return s.messages;
@@ -969,7 +958,6 @@ export class SessionManager {
     };
     const managed: ManagedSession = {
       tree: durableShellTree(reg?.tree ?? { messageEntries: {} }),
-      ...(reg?.tree?.localShellTurns?.length ? { recoverShellTurns: true } : {}),
       info,
       pi: undefined,
       messages: undefined,
@@ -1576,9 +1564,17 @@ function parsePiSessionText(s: ManagedSession, agentName: string, raw: string): 
   for (const e of entries) if (typeof e.id === "string") byId.set(e.id, e);
 
   let leaf = [...entries].reverse().find((entry) => entry.type !== "session" && typeof entry.id === "string");
-  const recoveringDispatch = (s.recoverShellTurns || hasInterruptedShellTurn(s)) && s.tree.localShellTurns?.some((turn) =>
-    s.tree.shellDispatch?.[turn.messages[1].info.id] === true && s.tree.messageEntries[turn.messages[1].info.id] === undefined);
-  const selectedLeaf = s.tree.revert ? s.tree.revert.previousLeafId : recoveringDispatch ? undefined : s.tree.leafId;
+  let selectedLeaf = s.tree.revert ? s.tree.revert.previousLeafId : s.tree.leafId;
+  if (!s.tree.revert && s.tree.localShellTurns?.length) {
+    // Follow a newly recorded descendant, never a sibling of the selected native branch.
+    if (selectedLeaf === null) selectedLeaf = undefined;
+    for (let entry = leaf; entry !== undefined; entry = typeof entry.parentId === "string" ? byId.get(entry.parentId) : undefined) {
+      if (entry.id === selectedLeaf) {
+        selectedLeaf = undefined;
+        break;
+      }
+    }
+  }
   if (selectedLeaf !== undefined) leaf = selectedLeaf === null ? undefined : byId.get(selectedLeaf);
   const chain: PiFileEntry[] = [];
   const seen = new Set<PiFileEntry>();
@@ -1606,7 +1602,7 @@ function parsePiSessionText(s: ManagedSession, agentName: string, raw: string): 
       }];
     }),
   };
-  if (s.tree.localShellTurns?.length) reconcileShellTurns(s, nativeTree);
+  if (s.tree.localShellTurns?.length) bindMessageEntries(s, nativeTree);
 
   const out: OCMessageWithParts[] = [];
   const toolParts = new Map<string, OCToolPart[]>();
@@ -1809,10 +1805,6 @@ function parsePiSessionText(s: ManagedSession, agentName: string, raw: string): 
         }
       }
     }
-  }
-  for (const turn of s.tree.localShellTurns ?? []) {
-    out.push(...turn.messages);
-    for (const message of turn.messages) (s.localMessageIds ??= new Set()).add(message.info.id);
   }
   return out;
 }

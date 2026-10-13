@@ -43,13 +43,18 @@ function gone(pid: number): void {
   assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
 }
 
-function setup(t: TestContext, maxLive = 8) {
+function setup(t: TestContext, maxLive = 8, reaperIntervalMs?: number) {
   const dir = mkdtempSync(join(tmpdir(), "ocpi-t9-"));
   const previous = process.env.OCPI_PI_BINARY;
   process.env.OCPI_PI_BINARY = fixture;
   const clock = new Clock();
   const store = new SessionStore(join(dir, "state"));
-  const manager = new SessionManager(() => undefined, store, dir, { clock, idleTimeoutMs: 100, maxLive });
+  const manager = new SessionManager(() => undefined, store, dir, {
+    clock,
+    idleTimeoutMs: 100,
+    maxLive,
+    reaperIntervalMs,
+  });
   t.after(async () => {
     await manager.disposeAll();
     if (previous === undefined) delete process.env.OCPI_PI_BINARY;
@@ -109,7 +114,7 @@ test("reaper makes an expired session dormant and preserves registry and history
   const before = await state(s.pi);
   const messages = manager.messages(info.id);
   const metadata = store.get(info.id);
-  assert.equal(clock.intervals[0]?.ms, 60_000);
+  assert.equal(clock.intervals[0]?.ms, 1_000);
   clock.time = 99;
   await manager.lifecycle.reap();
   assert.ok(s.pi);
@@ -135,6 +140,20 @@ test("reaper makes an expired session dormant and preserves registry and history
   assert.equal(store.get(info.id)?.piPath, metadata?.piPath);
   assert.equal(store.get(info.id)?.piSessionId, metadata?.piSessionId);
   assert.equal(store.get(info.id)?.created, metadata?.created);
+});
+
+test("reaper disposes by the first bounded sweep after idle timeout", async (t) => {
+  const { manager, clock, dir } = setup(t, 8, 25);
+  const info = await manager.create(dir);
+  const s = manager.get(info.id);
+  assert.ok(s?.pi);
+  const before = await state(s.pi);
+  assert.equal(clock.intervals[0]?.ms, 25);
+  clock.time = 125;
+  await manager.lifecycle.reap();
+  assert.equal(s.pi, undefined);
+  gone(before.pid);
+  gone(before.childPid);
 });
 
 test("reaper never disposes busy, pending-interaction or running-child sessions", async (t) => {

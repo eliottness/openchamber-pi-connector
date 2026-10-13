@@ -1,0 +1,17 @@
+{
+  "sources": [
+    "VacuumStream/2026-09-22T21-30-34-898Z:33",
+    "mellomori/2026-09-19T08-28-50-140Z:57",
+    "home/2026-10-07T20-24-52-645Z:56"
+  ],
+  "content": [
+    {"type":"text","text":"Before search."},
+    {"type":"providerNative","subtype":"server_tool_use","raw":{"type":"server_tool_use","id":"srvtoolu_web","name":"web_search","input":{"query":"Twitch dark theme color tokens"}}},
+    {"type":"thinking","thinking":"Compare sources."},
+    {"type":"providerNative","subtype":"server_tool_use","raw":{"type":"server_tool_use","id":"srvtoolu_tools","name":"tool_search_tool_bm25","input":{"query":"monitor command background completion"}}},
+    {"type":"providerNative","subtype":"tool_search_tool_result","raw":{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_tools","content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":"bash_output"},{"type":"tool_reference","tool_name":"memory"}]}}},
+    {"type":"providerNative","subtype":"web_search_tool_result","raw":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_web","content":[{"type":"web_search_result","title":"Twitch Colors - Hex and RGB Color Codes","url":"https://www.codeofcolors.com/twitch-colors.html","page_age":null}]}},
+    {"type":"providerNative","subtype":"web_search_call","raw":{"id":"ws_search","type":"web_search_call","status":"completed","action":{"type":"search","queries":["site.noctua.at fan does not spin","site.asus.com Q Fan fan stop"],"query":"site.noctua.at fan does not spin"}}},
+    {"type":"text","text":"After search."}
+  ]
+}

@@ -1,3 +1,5 @@
+import type { OCToolPart } from "./types.js";
+
 /** OmO arguments translated to OpenChamber's renderer contracts. */
 export interface MappedTool {
   tool: string;
@@ -99,4 +101,134 @@ export function mapTool(omoName: string, args: unknown, result?: ToolResult): Ma
     ...mapped, output: mapped.output ?? resultText(result.content),
     ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
   };
+}
+
+/** JSON first, then the literal-only Python repr used by older session files.
+ * Never execute provider content; invalid or incomplete literals are skipped.
+ */
+function providerRaw(value: unknown): Record<string, unknown> | undefined {
+  if (record(value)) return value;
+  if (typeof value !== "string") return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+    const json = value.replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\b(?:None|True|False)\b/g, (token) => {
+      if (token.startsWith('"')) return token;
+      if (token.startsWith("'")) {
+        return `"${token.slice(1, -1).replace(/\\.|"/g, (escape) =>
+          escape === "\\'" ? "'" : escape === '"' ? '\\"' : escape)}"`;
+      }
+      return token === "None" ? "null" : token === "True" ? "true" : "false";
+    });
+    try {
+      parsed = JSON.parse(json);
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+      return undefined;
+    }
+  }
+  return record(parsed) ? parsed : undefined;
+}
+
+/** One card at each call's original block index; result blocks are not cards.
+ * Shared by RPC snapshots and history so ids and renderer state survive reloads.
+ */
+export function providerToolParts(
+  content: unknown, sessionID: string, messageID: string, timestamp: number, final: boolean,
+): Map<number, OCToolPart> {
+  const parts = new Map<number, OCToolPart>();
+  if (!Array.isArray(content)) return parts;
+  const blocks = content.map((block: unknown) => record(block) && block.type === "providerNative"
+    ? { subtype: block.subtype, raw: providerRaw(block.raw) } : undefined);
+  blocks.forEach((block, index) => {
+    const raw = block?.raw;
+    if (raw === undefined || typeof raw.id !== "string" || raw.id === "") return;
+    let tool: string;
+    let input: Record<string, unknown>;
+    let title: string;
+    let output = "";
+    let error: string | undefined;
+    let complete = final;
+    switch (block?.subtype) {
+      case "server_tool_use": {
+        if (typeof raw.name !== "string") return;
+        input = record(raw.input) ? raw.input : {};
+        title = typeof input.query === "string" ? input.query : raw.name;
+        tool = raw.name === "web_search" ? "websearch" : raw.name;
+        break;
+      }
+      case "web_search_call": {
+        const action = record(raw.action) ? raw.action : {};
+        const queries = Array.isArray(action.queries) ? action.queries.filter((q): q is string => typeof q === "string") : [];
+        title = queries.length > 0 ? queries.join("\n") : typeof action.query === "string" ? action.query : "";
+        tool = action.type === "open_page" ? "webfetch" : "websearch";
+        input = tool === "webfetch" ? { url: action.url } : { query: title };
+        if (tool === "webfetch" && typeof action.url === "string") title = action.url;
+        complete ||= raw.status === "completed";
+        if (raw.status === "failed" || raw.status === "error" || raw.status === "cancelled") {
+          error = typeof raw.error === "string" ? raw.error : `Web search ${raw.status}`;
+        }
+        break;
+      }
+      default:
+        return;
+    }
+    const time = { start: timestamp, end: timestamp };
+    parts.set(index, {
+      id: `prt_${sessionID}_provider_${raw.id}`, sessionID, messageID,
+      type: "tool", callID: raw.id, tool,
+      state: error !== undefined
+        ? { status: "error", input, error, time }
+        : complete
+          ? { status: "completed", input, title, output, metadata: {}, time }
+          : { status: "running", input, title, time: { start: timestamp } },
+    });
+  });
+  applyProviderToolResults(content, parts.values(), timestamp);
+  return parts;
+}
+
+/** OmO can append a server result in a later assistant message, not just the
+ * call's message. Mutate the original card so ownership and id stay intact.
+ */
+export function applyProviderToolResults(content: unknown, parts: Iterable<OCToolPart>, timestamp: number): OCToolPart[] {
+  const updated: OCToolPart[] = [];
+  if (!Array.isArray(content)) return updated;
+  const byCallID = new Map([...parts].map((part) => [part.callID, part]));
+  for (const block of content) {
+    if (!record(block) || block.type !== "providerNative" ||
+      (block.subtype !== "web_search_tool_result" && block.subtype !== "tool_search_tool_result")) continue;
+    const raw = providerRaw(block.raw);
+    if (typeof raw?.tool_use_id !== "string") continue;
+    const part = byCallID.get(raw.tool_use_id);
+    if (part === undefined) continue;
+    const result = raw.content;
+    let output = "";
+    let error: string | undefined;
+    if (Array.isArray(result)) {
+      output = result.filter(record)
+        .filter((item) => typeof item.title === "string" && typeof item.url === "string")
+        .map((item) => `${item.title} - ${item.url}`).join("\n");
+    } else if (record(result)) {
+      if (typeof result.type === "string" && result.type.endsWith("_error")) {
+        error = typeof result.error_code === "string" ? result.error_code : "Server tool failed";
+      } else if (Array.isArray(result.tool_references)) {
+        output = result.tool_references.filter(record).map((item) => item.tool_name)
+          .filter((name): name is string => typeof name === "string").join("\n");
+      }
+    }
+    const state = part.state;
+    const time = { start: state.status === "pending" ? timestamp : state.time.start, end: timestamp };
+    part.state = error !== undefined
+      ? { status: "error", input: state.input, error, time }
+      : {
+          status: "completed", input: state.input, output, metadata: {},
+          title: state.status === "running" || state.status === "completed" ? state.title ?? part.tool : part.tool,
+          time,
+        };
+    updated.push(part);
+  }
+  return updated;
 }

@@ -12,7 +12,7 @@ import { setThinkingLevel, type ModelSelection, type ThinkingState } from "./thi
 import { SessionLifecycle, type LifecycleOptions } from "./lifecycle.js";
 import { ApprovalBridge, extensionUiRequestFrom, type PendingPermission, type PendingQuestion } from "./approvals.js";
 import { getAgentName } from "./agent-name.js";
-import { mapTool, resultMetadata, resultText } from "./tool-map.js";
+import { applyProviderToolResults, mapTool, providerToolParts, resultMetadata, resultText } from "./tool-map.js";
 import { TodoBridge, type Todo, type TodoUpdated } from "./todo-bridge.js";
 import { bindMessageEntries, forkConversation, getEntries, navigate, recordTurn, revertConversation, revertNotice, SessionTreeError, unrevertConversation, type SessionTreeState } from "./session-tree.js";
 import { SubagentBridge, taskParts, updateTaskParts, taskCompletions } from "./subagents.js";
@@ -1146,6 +1146,7 @@ export class SessionManager {
       case "message_end": {
         const ended = ev.message as { role?: string; usage?: PiUsage; provider?: unknown; model?: unknown; responseModel?: unknown } | undefined;
         if (ended?.role === "assistant" && s.streaming) {
+          this.onProviderTools(s, ev.message, true);
           // Last chance to correct attribution: some providers only reveal the
           // concrete model once the stream has closed.
           if (this.applyPiModel(s, ended.provider, piModelId(ended.responseModel, ended.model)) && s.model !== undefined) {
@@ -1192,8 +1193,9 @@ export class SessionManager {
     const streaming = s.streaming;
     if (!streaming) return;
     const ame = ev.assistantMessageEvent as
-      | { type: string; contentIndex?: number; delta?: string; content?: string; id?: string; toolName?: string; toolCall?: { id?: string; name?: string; arguments?: Record<string, unknown> } }
+      | { type: string; partial?: unknown; contentIndex?: number; delta?: string; content?: string; id?: string; toolName?: string; toolCall?: { id?: string; name?: string; arguments?: Record<string, unknown> } }
       | undefined;
+    this.onProviderTools(s, ev.message ?? ame?.partial, false);
     if (!ame || ame.contentIndex === undefined) return;
 
     if (ame.type.startsWith("toolcall_")) {
@@ -1230,6 +1232,26 @@ export class SessionManager {
       this.emitPart(s, textPart);
     }
     this.emit(dir, { type: "message.updated", properties: { info: streaming.message } });
+  }
+
+  private onProviderTools(s: ManagedSession, message: unknown, final: boolean): void {
+    const streaming = s.streaming;
+    if (!streaming || message === null || typeof message !== "object") return;
+    const snapshot = message as { content?: unknown; timestamp?: unknown };
+    const timestamp = typeof snapshot.timestamp === "number" ? snapshot.timestamp : streaming.message.time.created;
+    const mapped = providerToolParts(snapshot.content, s.info.id, streaming.message.id, timestamp, final);
+    for (const [index, part] of mapped) {
+      streaming.parts.set(index, part);
+      s.toolByCallId.set(part.callID, part);
+      this.emitPart(s, part);
+    }
+    for (const part of applyProviderToolResults(snapshot.content, s.toolByCallId.values(), timestamp)) {
+      this.emitPart(s, part);
+    }
+    const owner = s.messages?.find((m) => m.info.id === streaming.message.id);
+    if (owner && mapped.size > 0) {
+      owner.parts = [...streaming.parts].sort(([a], [b]) => a - b).map(([, part]) => part);
+    }
   }
 
   /**
@@ -1363,6 +1385,7 @@ export class SessionManager {
   /** Tool parts that never received a result (abort, crash) must not spin forever. */
   private finalizeDanglingTools(s: ManagedSession): void {
     for (const part of s.toolByCallId.values()) {
+      if (part.state.status === "completed" || part.state.status === "error") continue;
       const startedAt = part.state.status !== "pending" ? part.state.time.start : Date.now();
       part.state = {
         status: "error",
@@ -1617,6 +1640,7 @@ function parsePiSessionText(s: ManagedSession, agentName: string, raw: string): 
       };
       const parts: OCPart[] = [];
       const blocks = Array.isArray(m.content) ? m.content : [];
+      const providerParts = providerToolParts(blocks, sessionID, msgId, typeof m.timestamp === "number" ? m.timestamp : created, true);
       blocks.forEach((block, b) => {
         const partId = `prt_${sessionID}_r${idx}_${b}`;
         const kind = block?.type;
@@ -1624,6 +1648,12 @@ function parsePiSessionText(s: ManagedSession, agentName: string, raw: string): 
           parts.push({ id: partId, sessionID, messageID: msgId, type: "text", text: block.text, time: { start: created, end: created } });
         } else if (kind === "thinking" && typeof block.thinking === "string") {
           parts.push({ id: partId, sessionID, messageID: msgId, type: "reasoning", text: block.thinking, time: { start: created, end: created } });
+        } else if (kind === "providerNative") {
+          const part = providerParts.get(b);
+          if (part !== undefined) {
+            parts.push(part);
+            toolParts.set(part.callID, [part]);
+          }
         } else if (kind === "toolCall") {
           const callID = typeof block.id === "string" ? block.id : `call_r${idx}_${b}`;
           const tool = typeof block.name === "string" ? block.name : "unknown";
@@ -1648,6 +1678,7 @@ function parsePiSessionText(s: ManagedSession, agentName: string, raw: string): 
           parts.push(...mappedParts);
         }
       });
+      applyProviderToolResults(blocks, [...toolParts.values()].flat(), typeof m.timestamp === "number" ? m.timestamp : created);
       out.push({ info, parts });
       continue;
     }

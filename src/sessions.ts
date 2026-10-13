@@ -6,7 +6,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { PiRpcClient } from "./pi-rpc.js";
+import { PiRpcClient, type PiRpcCommand, type PiRpcResponse } from "./pi-rpc.js";
 import { SessionLifecycle, type LifecycleOptions } from "./lifecycle.js";
 import { ApprovalBridge, extensionUiRequestFrom, type PendingPermission, type PendingQuestion } from "./approvals.js";
 import { getAgentName } from "./agent-name.js";
@@ -423,6 +423,13 @@ export class SessionManager {
     if (notice) this.emit(s.info.directory, { type: "message.removed", properties: { sessionID: s.info.id, messageID: notice.info.id } });
   }
 
+  reloadMessages(sessionId: string): OCMessageWithParts[] | undefined {
+    const s = this.get(sessionId);
+    if (!s) return undefined;
+    s.messages = undefined;
+    return this.ensureMessages(s);
+  }
+
   statuses(): Record<string, OCSessionStatus> {
     const out: Record<string, OCSessionStatus> = {};
     for (const s of this.sessions.values()) out[s.info.id] = s.status; // dormant sessions are idle
@@ -498,6 +505,21 @@ export class SessionManager {
       (response) => s.pi?.respondExtensionUI(response),
       () => s.streaming?.message.id ?? [...(s.messages ?? [])].reverse().find((m) => m.info.role === "assistant")?.info.id,
     );
+  }
+
+  async sessionRpc<T = unknown>(
+    sessionId: string,
+    command: Omit<PiRpcCommand, "id">,
+  ): Promise<PiRpcResponse & { data?: T }> {
+    const s = this.get(sessionId);
+    if (!s) throw new Error(`unknown session: ${sessionId}`);
+    return this.lifecycle.use(s, async () => {
+      if (s.pi === undefined) await this.revive(s);
+      const pi = s.pi;
+      if (pi === undefined) throw new Error(`session cannot be resumed: ${sessionId}`);
+      this.lifecycle.touch(s);
+      return pi.command<T>(command);
+    });
   }
 
   /**

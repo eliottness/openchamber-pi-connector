@@ -1,7 +1,8 @@
 # OmO version pins
 
-- Date: 2026-10-12
+- Date: 2026-10-13
 - Connector base commit: `5c79876`
+- Current deployment tag: `omo-v6` (`3292897`)
 - OpenChamber: `1.24.2`
 - OmO: `5.1.21` (senpi `2026.10.10-3`)
 - Node.js: `v22.23.1`

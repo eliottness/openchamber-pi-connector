@@ -423,7 +423,7 @@ export class AdapterServer {
       return;
     }
     if ((path === "/config" || path === "/global/config") && method === "GET") {
-      this.json(res, 200, {});
+      this.json(res, 200, { default_agent: getAgentName() });
       return;
     }
 
@@ -546,7 +546,7 @@ export class AdapterServer {
             ? `${piName} (pi coding agent via openchamber-pi-connector)`
             : `${name} — ${piName} (pi coding agent via openchamber-pi-connector)`,
         mode: "primary",
-        hidden: false,
+        hidden: name === "build" && piName !== "build",
         options: {},
       })));
       return;
@@ -569,7 +569,7 @@ export class AdapterServer {
           ? `${piName} (pi coding agent via openchamber-pi-connector)`
           : `${name} — ${piName} (pi coding agent via openchamber-pi-connector)`,
       mode: "primary",
-      hidden: false,
+      hidden: name === "build" && piName !== "build",
       options: {},
     }));
   }
@@ -619,7 +619,7 @@ export class AdapterServer {
       return;
     }
     if (path === "/api/config" && method === "GET") {
-      this.json(res, 200, []);
+      this.json(res, 200, withLocation({ default_agent: getAgentName() }));
       return;
     }
     if (path === "/api/provider" && method === "GET") {

@@ -51,9 +51,11 @@ function alive(identity: ProcessIdentity): boolean {
 function signalOwned(identity: ProcessIdentity, signal: NodeJS.Signals): void {
   if (!alive(identity)) return;
   try {
-    process.kill(identity.pid === identity.group ? -identity.group : identity.pid, signal);
+    assert.ok(!readFileSync(`/proc/${identity.pid}/cgroup`, "utf8").includes("/openchamber.service"),
+      `refusing to signal live service pid=${identity.pid}`);
+    process.kill(identity.pid, signal);
   } catch (error) {
-    if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error;
+    if (!(error instanceof Error && "code" in error && (error.code === "ESRCH" || error.code === "ENOENT"))) throw error;
   }
 }
 
@@ -193,13 +195,13 @@ export class SmokeContext {
     return this.capture().filter((info) => processKind(info.argv) === "rpc");
   }
 
-  assertShutdownProcesses(): void {
+  async assertShutdownProcesses(signal: AbortSignal = AbortSignal.timeout(16_000)): Promise<void> {
     const remaining = this.capture();
     for (const info of remaining.filter((candidate) => processKind(candidate.argv) === "task-host")) {
-      console.log(`INFO detached task-host pid=${info.pid} cmdline=${info.argv.join(" ")}; expected self-expiry 15 minutes after last client leaves; scoped harness cleanup will terminate it`);
+      console.log(`CLEANUP detached task-host pid=${info.pid} cmdline=${info.argv.join(" ")}; expected self-expiry 15 minutes after last client leaves; terminating now`);
     }
     for (const info of remaining.filter((candidate) => processKind(candidate.argv) === "detached-service")) {
-      console.log(`INFO detached OmO service pid=${info.pid} cmdline=${info.argv.join(" ")}; scoped harness cleanup will terminate it`);
+      console.log(`CLEANUP detached OmO service pid=${info.pid} cmdline=${info.argv.join(" ")}; terminating now`);
     }
     assert.deepEqual(remaining.filter((info) => {
       const kind = processKind(info.argv);
@@ -207,6 +209,10 @@ export class SmokeContext {
     }).map((info) => ({
       pid: info.pid, cmdline: info.argv.join(" "),
     })), [], "connector-spawned RPC and unknown processes must disappear after SIGTERM");
+    await this.terminate(remaining, signal);
+    assert.deepEqual(this.capture().map((info) => ({
+      pid: info.pid, cmdline: info.argv.join(" "),
+    })), [], "owned processes must not survive scoped shutdown cleanup");
   }
 
   async start(signal: AbortSignal, isolatedDiscovery = false, idleTimeoutMs = 900_000, piArgs = process.env.OCPI_PI_ARGS ?? ""): Promise<void> {
@@ -352,6 +358,20 @@ export class SmokeContext {
     assert.deepEqual(remaining.map((identity) => identity.pid), [], "no connector-owned processes may survive");
   }
 
+  /** Subscribe to death before signalling exact, start-time-checked owned PIDs. */
+  private async terminate(identities: readonly ProcessIdentity[], signal: AbortSignal): Promise<void> {
+    const death = this.waitForDeath(identities, 15_000, signal);
+    for (const identity of identities) signalOwned(identity, "SIGTERM");
+    const escalation = setTimeout(() => {
+      for (const identity of identities) signalOwned(identity, "SIGKILL");
+    }, 6_000);
+    try {
+      await death;
+    } finally {
+      clearTimeout(escalation);
+    }
+  }
+
   async cleanup(): Promise<void> {
     clearInterval(this.observer);
     await this.sse.stop();
@@ -363,16 +383,7 @@ export class SmokeContext {
         this.capture();
         const identities = [...this.owned.values()].filter(alive);
         if (identities.length === 0) break;
-        const death = this.waitForDeath(identities, 15_000, AbortSignal.timeout(16_000));
-        for (const identity of identities) signalOwned(identity, "SIGTERM");
-        const escalation = setTimeout(() => {
-          for (const identity of identities) signalOwned(identity, "SIGKILL");
-        }, 6_000);
-        try {
-          await death;
-        } finally {
-          clearTimeout(escalation);
-        }
+        await this.terminate(identities, AbortSignal.timeout(16_000));
       }
       this.assertNoOwnedProcesses();
       console.log("CLEANUP PASS: no owned connector or OmO processes remain");

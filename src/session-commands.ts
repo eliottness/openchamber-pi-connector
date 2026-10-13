@@ -51,7 +51,10 @@ function shellTitle(command: string): string {
 
 function assistantMessage(session: ManagedSession): OCAssistantMessage {
   const created = Date.now();
-  const parentID = [...(session.messages ?? [])].reverse().find((message) => message.info.role === "user")?.info.id ?? "";
+  const messages = session.messages ?? [];
+  const boundary = messages.findIndex((message) => message.info.id === session.tree.revert?.messageID);
+  const visible = boundary < 0 ? messages : messages.slice(0, boundary);
+  const parentID = [...visible].reverse().find((message) => message.info.role === "user")?.info.id ?? "";
   return {
     id: id("msg"),
     sessionID: session.info.id,
@@ -183,8 +186,7 @@ export function createShellMessage(session: ManagedSession, command: string): Sh
 
 export function announceSessionNotice(context: ShareNoticeContext, messageText: string): void {
   const { session, sessions, emit } = context;
-  const messages = sessions.messages(session.info.id);
-  if (!messages) return;
+  if (!sessions.messages(session.info.id)) return;
   const info = assistantMessage(session);
   const created = info.time.created;
   info.time.completed = created;
@@ -197,7 +199,7 @@ export function announceSessionNotice(context: ShareNoticeContext, messageText: 
     time: { start: created, end: created },
   };
   const message: ShareNoticeMessage = { info, parts: [part] };
-  messages.push(message);
+  sessions.appendMessage(session.info.id, message);
   emit(session.info.directory, { type: "message.updated", properties: { info } });
   emit(session.info.directory, { type: "message.part.updated", properties: { part } });
 }
@@ -245,7 +247,7 @@ export async function compactSession(sessions: SessionManager, sessionId: string
 
 export async function runShellCommand(context: ShellCommandContext): Promise<ShellExecution> {
   const { session, sessions, command } = context;
-  const messages = sessions.messages(session.info.id) ?? [];
+  sessions.messages(session.info.id);
   const message = createShellMessage(session, command);
   const controller = new AbortController();
   session.cancelShell = () => {
@@ -255,7 +257,7 @@ export async function runShellCommand(context: ShellCommandContext): Promise<She
     session.pi?.notify({ type: "abort_bash" });
     controller.abort();
   };
-  messages.push(message);
+  sessions.appendMessage(session.info.id, message);
   setShellStatus(context, "busy");
   emitShellMessage(context, message);
   try {

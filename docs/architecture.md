@@ -67,6 +67,18 @@ message before the cutoff says "Conversation reverted. Files were not
 changed." and is not sent to the model. Unknown messageIDs are rejected with
 HTTP 400 before navigation.
 
+History refreshes and compact/bash RPCs share the conversation-operation queue
+with prompt, fork, revert and unrevert. A refresh cannot read an intermediate
+navigation state or overwrite the cursor before its operation completes.
+
+Adapter-authored shell cards and notices are retained in canonical in-memory
+history, not appended to the revert-notice projection. While reverted, new
+cards are inserted before the hidden redo branch and belong to the last visible
+user turn, so completed shell output remains rendered. Refresh, unrevert and a
+replacement prompt retain these cards; they are never matched to OmO JSONL
+entries or sent to the model. This retention lasts for the connector process,
+not across connector restarts: adapter-only cards are not persisted transcripts.
+
 ### Event translation
 
 | OpenCode (SSE `event`) | pi (stdout JSONL) |

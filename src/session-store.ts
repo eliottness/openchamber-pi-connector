@@ -7,7 +7,7 @@
  *
  *   1. a scan of that directory to rebuild the sidebar after a restart, and
  *   2. a small registry JSON for adapter-owned metadata that pi does not
- *      keep (the OpenChamber title override from `rename`).
+ *      keep (titles, conversation cursors and child-task metadata).
  *
  * OpenChamber session ids for restored sessions are derived deterministically
  * (`ses_` + md5 of the pi session id) so the same pi session always maps to
@@ -73,6 +73,13 @@ export interface SessionRegistryEntry {
   model?: { providerID: string; modelID: string };
   created: number;
   updated: number;
+}
+
+export class SessionPersistenceError extends Error {
+  constructor(file: string, cause: unknown) {
+    super(`Failed to persist session registry ${file}: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+    this.name = "SessionPersistenceError";
+  }
 }
 
 /** Read at most this many leading bytes when sniffing headers/titles. */
@@ -292,16 +299,17 @@ export class SessionStore {
     return this.entries;
   }
 
-  private persist(): void {
-    const obj = Object.fromEntries(this.load());
+  private persist(entries: Map<string, SessionRegistryEntry>): void {
+    const obj = Object.fromEntries(entries);
     try {
       mkdirSync(join(this.file, ".."), { recursive: true });
       const tmp = `${this.file}.${process.pid}.tmp`;
       writeFileSync(tmp, JSON.stringify(obj, null, 2));
       renameSync(tmp, this.file);
-    } catch {
-      /* best-effort: titles are cosmetic, session scan is the source of truth */
+    } catch (error) {
+      throw new SessionPersistenceError(this.file, error);
     }
+    this.entries = entries;
   }
 
   get(ocSessionId: string): SessionRegistryEntry | undefined {
@@ -313,8 +321,9 @@ export class SessionStore {
   }
 
   set(ocSessionId: string, entry: SessionRegistryEntry): void {
-    this.load().set(ocSessionId, entry);
-    this.persist();
+    const entries = new Map(this.load());
+    entries.set(ocSessionId, entry);
+    this.persist(entries);
   }
 
   /** Merge a partial update (e.g. title override, updated timestamp). */
@@ -322,12 +331,12 @@ export class SessionStore {
     const map = this.load();
     const prev = map.get(ocSessionId);
     if (prev === undefined) return;
-    map.set(ocSessionId, { ...prev, ...patch });
-    this.persist();
+    this.set(ocSessionId, { ...prev, ...patch });
   }
 
   remove(ocSessionId: string): void {
-    if (this.load().delete(ocSessionId)) this.persist();
+    const entries = new Map(this.load());
+    if (entries.delete(ocSessionId)) this.persist(entries);
   }
 
   /** Every directory the registry knows about — used to resolve bare session ids. */

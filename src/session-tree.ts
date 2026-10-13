@@ -63,6 +63,7 @@ export function bindMessageEntries(s: ManagedSession, tree: Entries): void {
     }
     const text = entry.message?.content?.filter((part) => part.type === "text").map((part) => part.text ?? "").join("");
     const index = messages.findIndex((message, i) => i >= cursor &&
+      !s.localMessageIds?.has(message.info.id) &&
       s.tree.messageEntries[message.info.id] === undefined && message.info.role === entry.message?.role &&
       (message.info.role !== "user" || message.parts.filter((part) => part.type === "text").map((part) => part.text).join("") === text));
     const message = messages[index];

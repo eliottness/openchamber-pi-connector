@@ -124,6 +124,16 @@ test("single real RPC task creates a linked nested session and strips the suffix
   assert.ok(texts(manager.messages(childID)).includes("quick task done"));
 });
 
+test("F2 B3 child registry save failure emits a visible session error", (t) => {
+  const { manager, parent, events, state } = setup(t);
+  mkdirSync(join(state, "sessions.json"), { recursive: true });
+  start(manager, parent, { description: "save failure", prompt: "child job", category: "quick" });
+  result(manager, parent, { task_id: "st_save_failure", status: "completed", final_response: "done" });
+  assert.ok(events.some((event) => event.type === "session.error" &&
+    event.properties.sessionID === ocIdFor("st_save_failure") &&
+    event.properties.error?.name === "SessionPersistenceError"));
+});
+
 test("real tasks array yields stable parts and separately fetchable children", (t) => {
   const { manager, parent, directory } = setup(t);
   const batch = fixture.samples[1];

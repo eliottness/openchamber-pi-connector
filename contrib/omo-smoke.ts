@@ -25,6 +25,7 @@ process.on("SIGTERM", onSigterm);
 
 try {
   const only = parseOnly(process.argv.slice(2));
+  const isolatedShutdown = only?.size === 1 && only.has("shutdown");
   const binary = process.env.OCPI_PI_BINARY;
   if (!binary?.trim()) throw new Error("OCPI_PI_BINARY is required; set it to the OmO executable");
   context = new SmokeContext(binary, shutdown.signal);
@@ -33,7 +34,7 @@ try {
   for (const file of readdirSync(directory).filter((file) => file.endsWith(".ts")).sort()) {
     const module = await import(new URL(file, directory).href);
     if (typeof module.register !== "function") throw new Error(`${file} must export register(check, context)`);
-    module.register(registry.check, context);
+    module.register(registry.check, context, isolatedShutdown);
   }
   const results = await registry.run({ only, signal: shutdown.signal, log: console.log });
   process.exitCode = interrupted ? 130 : summarize(results).exitCode;

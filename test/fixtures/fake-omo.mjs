@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -90,6 +90,10 @@ input.on("line", (line) => {
     data = model;
   }
   if (command.type === "compact") record("assistant", "Compacted summary");
+  if (command.type === "bash") data = {
+    output: execSync(command.command, { cwd: process.cwd(), encoding: "utf8" }),
+    exitCode: 0, cancelled: false, truncated: false,
+  };
   if (command.type === "prompt") {
     record("user", command.message);
     send({ type: "agent_start" });

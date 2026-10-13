@@ -2,7 +2,7 @@
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, watch, writeFileSync, type FSWatcher } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { piAgentDir } from "./agent-dir.js";
-import { ocIdFor, type SessionStore } from "./session-store.js";
+import { ocIdFor, SessionPersistenceError, type SessionStore } from "./session-store.js";
 import { mapTool, resultText, toolMappers, type ToolResult } from "./tool-map.js";
 import type { ManagedSession } from "./sessions.js";
 import type { OCEvent, OCMessageWithParts, OCToolPart } from "./types.js";
@@ -420,11 +420,19 @@ export class SubagentBridge {
 
   private persist(child: Child): void {
     const { info } = child.session;
-    this.store.set(info.id, {
-      piSessionId: child.session.piSessionId ?? child.task.id, piPath: this.archive(child.task.id),
-      directory: info.directory, title: info.title, parentID: info.parentID, task: child.task,
-      created: info.time.created, updated: info.time.updated,
-    });
+    try {
+      this.store.set(info.id, {
+        piSessionId: child.session.piSessionId ?? child.task.id, piPath: this.archive(child.task.id),
+        directory: info.directory, title: info.title, parentID: info.parentID, task: child.task,
+        created: info.time.created, updated: info.time.updated,
+      });
+    } catch (error) {
+      if (!(error instanceof SessionPersistenceError)) throw error;
+      this.emit(info.directory, {
+        type: "session.error",
+        properties: { sessionID: info.id, error: { name: error.name, data: { message: error.message } } },
+      });
+    }
   }
 
   private emitPart(session: ManagedSession, part: OCToolPart | OCMessageWithParts["parts"][number]): void {

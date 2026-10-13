@@ -5,6 +5,7 @@ Run from the repository with Node 22 or newer:
 ```sh
 OCPI_PI_BINARY=/path/to/omo npm run omo-smoke
 OCPI_PI_BINARY=/path/to/omo npm run omo-smoke -- --only prompt,abort
+OCPI_PI_BINARY=/path/to/omo npm run omo-smoke -- --only shutdown
 ```
 
 `PI_CODING_AGENT_DIR` selects the existing agent directory for read-only
@@ -17,11 +18,13 @@ is removed on completion, failure, SIGINT, or SIGTERM.
 OmO uses the copied configuration unchanged, including speculative task-host
 prewarming. Detached task-host supervisors and their multi-session engines have
 a 15-minute idle policy after their last client leaves. Shutdown fails if any
-connector session RPC process survives SIGTERM, but reports surviving detached
-hosts as INFO with PID, command line, and expected self-expiry. Harness cleanup
-then terminates those hosts. A workspace-owned detached OmO LSP daemon is also
-reported as INFO and terminated by scoped cleanup; session RPCs and unknown
-processes remain strict shutdown failures. Inherited RPC socket, watchdog, and
+connector session RPC process survives SIGTERM. Surviving detached hosts are
+reported with PID, command line, and expected self-expiry, then terminated by
+scoped harness cleanup **inside the shutdown check**. A workspace-owned detached
+OmO LSP daemon is likewise reported and terminated. Shutdown cannot PASS until
+every owned process is gone; any helper surviving cleanup is a FAIL. Session
+RPCs and unknown processes fail before fallback cleanup can hide them.
+Inherited RPC socket, watchdog, and
 cleanup-path variables are stripped so QA cannot attach to the caller's host.
 The isolated HOME passes OmO's documented onboarding-disable CLI flag and
 seeds the private onboarding-completed marker for detached task hosts, which do
@@ -81,7 +84,11 @@ Waits observe future events only; old idle/delta frames cannot satisfy a new
 turn. The base connector currently streams deltas as
 `message.part.updated` with `properties.delta`, not `message.part.delta`.
 
-Prerequisites must already be registered. `--only` includes their transitive
+`--only shutdown` runs only a private connector/session startup and shutdown;
+it sends no model prompt and does not run the full smoke chain. Unfiltered
+shutdown still depends on the entire chain.
+
+Prerequisites must already be registered. Other `--only` selections include their transitive
 closure, marks other checks SKIP, and rejects unknown names. A failure or
 timeout marks FAIL and skips the remainder to prevent actions on a broken
 session. Every check receives an AbortSignal; pass it through all HTTP calls

@@ -122,6 +122,45 @@ for (const restarted of [false, true]) test(`F2 B4 shutdown owns private session
   assert.doesNotThrow(() => process.kill(unrelated.enginePid, 0));
 });
 
+test("F2 S1 failed private-host teardown is reported but local state is still released", { timeout: 20_000 }, async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "ocpi-s1-"));
+  const previous = process.env.OCPI_PI_BINARY;
+  process.env.OCPI_PI_BINARY = fixture;
+  const manager = new SessionManager(() => undefined, new SessionStore(join(dir, "state")), dir, { clock: new Clock() });
+  const info = await manager.create(dir);
+  const sessionId = manager.get(info.id)?.piSessionId;
+  assert.ok(sessionId);
+  const key = createHash("sha256").update(`p:${sessionId}`).digest("hex").slice(0, 16);
+  const host = spawn(process.execPath, [
+    resolve("test/fixtures/fake-omo-host.mjs"), "--internal-rpc-host-supervisor",
+    "--socket", join(dir, `p-${key}.sock`),
+  ], { cwd: dir, detached: true, stdio: ["ignore", "pipe", "ignore"] });
+  const hostExited = once(host, "exit");
+  t.after(async () => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    if (host.exitCode === null && host.signalCode === null) host.kill("SIGTERM");
+    await hostExited;
+    if (previous === undefined) delete process.env.OCPI_PI_BINARY;
+    else process.env.OCPI_PI_BINARY = previous;
+    rmSync(dir, { recursive: true, force: true });
+  });
+  assert.ok(host.stdout);
+  const [output] = await once(host.stdout, "data", { signal: deadline() });
+  const owned: { pid: number; enginePid: number } = JSON.parse(String(output));
+  const childProcess = await import("node:child_process");
+  const originalSpawn = childProcess.default.spawn;
+  t.mock.method(childProcess.default, "spawn", (binary: string, ...rest: unknown[]) =>
+    Reflect.apply(originalSpawn, childProcess.default, [binary === "/bin/python3" ? join(dir, "missing-python3") : binary, ...rest]));
+  syncBuiltinESMExports();
+
+  await assert.rejects(manager.disposeAll(), { code: "ENOENT" });
+
+  assert.equal(manager.get(info.id), undefined, "sessions are released even though host teardown failed");
+  assert.doesNotThrow(() => process.kill(owned.pid, 0), "fail closed: an unverified host is never signalled");
+  assert.doesNotThrow(() => process.kill(owned.enginePid, 0));
+});
+
 test("hung OmO receives SIGKILL at the injected five second deadline", { timeout: 15_000 }, async (t) => {
   const { dir, clock } = setup(t);
   const pi = new PiRpcClient({ cwd: dir, piBinary: fixture, args: ["--ignore-term"], clock });

@@ -798,12 +798,17 @@ export class SessionManager {
 
   async disposeAll(): Promise<void> {
     for (const s of this.sessions.values()) s.approvals?.cancelAll();
-    await this.lifecycle.stop();
-    await (this.hostShutdown ??= stopSessionHosts(this.createdSessions));
-    this.disposed = true;
-    this.subagents.dispose();
-    await Promise.all(this.diffEmissions.values());
-    this.sessions.clear();
+    try {
+      await this.lifecycle.stop();
+      await (this.hostShutdown ??= stopSessionHosts(this.createdSessions));
+    } finally {
+      // A failed private-host teardown is reported to the caller, but local
+      // state is released regardless; the hosts themselves are left alone.
+      this.disposed = true;
+      this.subagents.dispose();
+      await Promise.all(this.diffEmissions.values());
+      this.sessions.clear();
+    }
   }
 
   // ------------------------------------------------------------------

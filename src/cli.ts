@@ -49,7 +49,10 @@ if (serveMode) {
 }
 
 const shutdown = (): void => {
-  void server.stop().then(() => process.exit(0));
+  void server.stop().then(() => process.exit(0), (error: unknown) => {
+    console.error("openchamber-pi-connector: shutdown failed:", error);
+    process.exit(1);
+  });
 };
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);

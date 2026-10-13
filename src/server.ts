@@ -112,8 +112,11 @@ export class AdapterServer {
 
   async stop(): Promise<void> {
     for (const res of this.sseClients.keys()) res.end();
-    await this.sessions.disposeAll();
-    await new Promise<void>((resolve) => this.server.close(() => resolve()));
+    try {
+      await this.sessions.disposeAll();
+    } finally {
+      await new Promise<void>((resolve) => this.server.close(() => resolve()));
+    }
   }
 
   /** Both async APIs acknowledge admission; failures must reach SSE and history. */

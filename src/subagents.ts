@@ -177,7 +177,7 @@ export interface ChildTask {
 interface Child {
   session: ManagedSession;
   task: ChildTask;
-  parts: Set<OCToolPart>;
+  parts: Map<string, OCToolPart>;
   tail: JsonlTail;
   livePath: string | undefined;
   recordPath: string | undefined;
@@ -262,7 +262,7 @@ export class SubagentBridge {
       }
       child.live ||= live;
       if (terminal(details.status) && part.state.status !== "running") child.task.terminalAt = part.state.time.end;
-      child.parts.add(part);
+      child.parts.set(part.id, part);
       this.refresh(child, true);
     }
   }
@@ -277,7 +277,7 @@ export class SubagentBridge {
       pi: undefined, messages: undefined, model: undefined, streaming: undefined, status: { type: "idle" },
       toolByCallId: new Map(), tree: { messageEntries: {} }, hasPendingInteraction: () => false, hasRunningChildren: () => false,
     };
-    const child: Child = { session, task, parts: new Set(), tail: new JsonlTail(), watchers: new Map(), livePath: undefined, recordPath: undefined, loaded: false, live: false };
+    const child: Child = { session, task, parts: new Map(), tail: new JsonlTail(), watchers: new Map(), livePath: undefined, recordPath: undefined, loaded: false, live: false };
     this.children.set(session.info.id, child);
     this.sessions.set(session.info.id, session);
     this.wire(session);
@@ -379,7 +379,7 @@ export class SubagentBridge {
     child.loaded = true;
     child.session.status = { type: running ? "busy" : "idle" };
     if (!running) this.closeWatchers(child);
-    for (const part of child.parts) {
+    for (const part of child.parts.values()) {
       updateTaskParts([part], {
         details: child.task.details,
         content: [{ type: "text", text: child.task.details.final_response ?? "" }],
@@ -491,8 +491,14 @@ export class SubagentBridge {
     const child = this.children.get(id);
     if (!child) return;
     this.closeWatchers(child);
+    child.parts.clear();
     this.children.delete(id);
   }
 
-  dispose(): void { for (const child of this.children.values()) this.closeWatchers(child); }
+  dispose(): void {
+    for (const child of this.children.values()) {
+      this.closeWatchers(child);
+      child.parts.clear();
+    }
+  }
 }

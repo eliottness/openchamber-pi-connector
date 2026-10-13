@@ -47,7 +47,10 @@ function setup(t: TestContext) {
   put(parentPath, JSON.stringify({ type: "session", version: 3, id: "parent-pi", cwd: directory, timestamp: "2026-10-12T00:00:00.000Z" }) + "\n");
   const bus = new EventEmitter();
   const events: OCEvent[] = [];
-  const manager = new SessionManager((_directory, event) => { events.push(structuredClone(event)); bus.emit("event", event); }, new SessionStore(state), directory);
+  const manager = new SessionManager((_directory, event) => {
+    events.push(structuredClone(event) as OCEvent);
+    bus.emit("event", event as OCEvent);
+  }, new SessionStore(state), directory);
   const parent = manager.get(ocIdFor("parent-pi"));
   assert.ok(parent);
   manager.messages(parent.info.id);
@@ -153,6 +156,30 @@ test("real tasks array yields stable parts and separately fetchable children", (
     assert.ok(manager.list(directory).some((session) => session.id === childID));
     assert.ok(manager.messages(childID));
   });
+});
+
+test("rediscovery replaces one logical task card while keeping batch cards distinct", (t) => {
+  const { manager, parent, events } = setup(t);
+  start(manager, parent, { task_summary: "Stable child", prompt: "work" });
+  result(manager, parent, { task_id: "st_stable", status: "completed", final_response: "done" });
+  const original = parts(parent.messages)[0];
+  assert.ok(original);
+  const child = manager.subagents["children"].get(ocIdFor("st_stable"));
+  assert.ok(child);
+  events.splice(0);
+  for (let index = 0; index < 3; index++) {
+    manager.subagents.discover(parent, [{ info: parent.messages![0]!.info, parts: [structuredClone(original)] }]);
+  }
+  assert.equal(child.parts.size, 1);
+  assert.equal(events.filter((event) => event.type === "message.part.updated").length, 3);
+
+  const batch = fixture.samples[1];
+  start(manager, parent, batch.arguments, "distinct-batch");
+  manager["onPiEvent"](parent, { type: "tool_execution_end", toolCallId: "distinct-batch", result: batch });
+  const batchChildren = (batch.details.items as Array<{ task_id: string }>).map((item) =>
+    manager.subagents["children"].get(ocIdFor(item.task_id)));
+  assert.equal(batchChildren.length, 4);
+  assert.ok(batchChildren.every((batchChild: { parts: Map<string, OCToolPart> } | undefined) => batchChild?.parts.size === 1));
 });
 
 test("terminal record atomically archives and emits idle after streaming shared tool cards", async (t) => {

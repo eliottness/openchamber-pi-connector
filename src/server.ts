@@ -114,7 +114,10 @@ export class AdapterServer {
     // Stop admission before ending SSE: its clients can reconnect while the
     // session RPC groups and private task hosts are still being disposed.
     const closed = new Promise<void>((resolve) => this.server.close(() => resolve()));
-    for (const res of this.sseClients.keys()) res.end();
+    for (const res of this.sseClients.keys()) {
+      this.sseClients.delete(res);
+      res.end();
+    }
     try {
       await this.sessions.disposeAll();
     } finally {
@@ -146,6 +149,10 @@ export class AdapterServer {
       : this.v2events.translate(_directory, event);
     const v2Frames = frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`);
     for (const [res, flavor] of this.sseClients) {
+      if (res.writableEnded || res.destroyed) {
+        this.sseClients.delete(res);
+        continue;
+      }
       if (flavor === "v2") {
         for (const frame of v2Frames) res.write(frame);
       } else {
@@ -165,7 +172,7 @@ export class AdapterServer {
     // OpenChamber's SSE proxy aborts an upstream that is silent for 20s, so
     // mirror real opencode's `: heartbeat` comment keepalive.
     const heartbeat = setInterval(() => {
-      if (!res.writableEnded) res.write(": heartbeat\n\n");
+      if (!res.writableEnded && !res.destroyed) res.write(": heartbeat\n\n");
     }, 10_000);
     heartbeat.unref?.();
     res.on("close", () => {

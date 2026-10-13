@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { get, type IncomingMessage } from "node:http";
 import { tmpdir } from "node:os";
@@ -80,3 +81,14 @@ test("busy shutdown completes while the SSE client tries to reconnect during dis
   ]);
   assert.equal(completed, true, "server.stop hung on the SSE connection admitted during disposal");
 });
+
+for (const scenario of ["stop", "ended", "destroyed"]) {
+  test(`pending approval shutdown never broadcasts to ${scenario} SSE responses`, { timeout: 6000 }, () => {
+    const result = spawnSync(process.execPath, ["--import", "tsx", "test/fixtures/pending-sse-shutdown.mjs", scenario], {
+      cwd: process.cwd(), encoding: "utf8", timeout: 4000,
+    });
+    assert.equal(result.error, undefined, result.error?.message ?? "shutdown probe failed");
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /SHUTDOWN_PASS/);
+  });
+}

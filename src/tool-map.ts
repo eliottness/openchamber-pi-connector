@@ -108,22 +108,74 @@ export function mapTool(omoName: string, args: unknown, result?: ToolResult): Ma
  */
 function providerRaw(value: unknown): Record<string, unknown> | undefined {
   if (record(value)) return value;
-  if (typeof value !== "string") return undefined;
+  // Provider raw strings are display data, not an unbounded parser workload.
+  if (typeof value !== "string" || value.length > 1024 * 1024) return undefined;
   let parsed: unknown;
   try {
     parsed = JSON.parse(value);
   } catch (error) {
     if (!(error instanceof SyntaxError)) throw error;
-    const json = value.replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\b(?:None|True|False)\b/g, (token) => {
-      if (token.startsWith('"')) return token;
-      if (token.startsWith("'")) {
-        return `"${token.slice(1, -1).replace(/\\.|"/g, (escape) =>
-          escape === "\\'" ? "'" : escape === '"' ? '\\"' : escape)}"`;
+    // Scan once from left to right. An unterminated string never causes a
+    // retry at every escaped quote, unlike an unanchored string regex.
+    const tokens: string[] = [];
+    const simple: Record<string, string> = {
+      a: "\x07", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\x0b",
+      "\\": "\\", "'": "'", '"': '"',
+    };
+    let cursor = 0;
+    while (cursor < value.length) {
+      const char = value[cursor++];
+      if (char === "'" || char === '"') {
+        let decoded = "";
+        let closed = false;
+        while (cursor < value.length) {
+          const next = value[cursor++];
+          if (next === char) { closed = true; break; }
+          if (next !== "\\") {
+            if (next === "\n" || next === "\r") return undefined;
+            decoded += next;
+            continue;
+          }
+          const escape = value[cursor++];
+          if (escape === undefined) return undefined;
+          if (Object.hasOwn(simple, escape)) {
+            decoded += simple[escape];
+          } else if (escape === "x" || escape === "u" || escape === "U") {
+            const length = escape === "x" ? 2 : escape === "u" ? 4 : 8;
+            const hex = value.slice(cursor, cursor + length);
+            if (hex.length !== length || !/^[0-9a-fA-F]+$/.test(hex)) return undefined;
+            const code = Number.parseInt(hex, 16);
+            if (code > 0x10ffff) return undefined;
+            decoded += String.fromCodePoint(code);
+            cursor += length;
+          } else if (/[0-7]/.test(escape)) {
+            let octal = escape;
+            while (octal.length < 3 && cursor < value.length && /[0-7]/.test(value[cursor] ?? "")) {
+              octal += value[cursor++];
+            }
+            decoded += String.fromCodePoint(Number.parseInt(octal, 8));
+          } else if (escape === "\n") {
+            // Python backslash-newline continuation contributes no character.
+          } else if (escape === "\r") {
+            if (value[cursor] === "\n") cursor++;
+          } else {
+            // Python preserves unrecognized escape sequences verbatim.
+            decoded += `\\${escape}`;
+          }
+        }
+        if (!closed) return undefined;
+        tokens.push(JSON.stringify(decoded));
+      } else if (char !== undefined && /[A-Za-z_]/.test(char)) {
+        const start = cursor - 1;
+        while (cursor < value.length && /[A-Za-z_]/.test(value[cursor] ?? "")) cursor++;
+        const token = value.slice(start, cursor);
+        tokens.push(token === "None" ? "null" : token === "True" ? "true" : token === "False" ? "false" : token);
+      } else if (char !== undefined) {
+        tokens.push(char);
       }
-      return token === "None" ? "null" : token === "True" ? "true" : "false";
-    });
+    }
     try {
-      parsed = JSON.parse(json);
+      parsed = JSON.parse(tokens.join(""));
     } catch (error) {
       if (!(error instanceof SyntaxError)) throw error;
       return undefined;
@@ -136,7 +188,7 @@ function providerRaw(value: unknown): Record<string, unknown> | undefined {
  * Shared by RPC snapshots and history so ids and renderer state survive reloads.
  */
 export function providerToolParts(
-  content: unknown, sessionID: string, messageID: string, timestamp: number, final: boolean,
+  content: unknown, sessionID: string, messageID: string, timestamp: number,
 ): Map<number, OCToolPart> {
   const parts = new Map<number, OCToolPart>();
   if (!Array.isArray(content)) return parts;
@@ -150,7 +202,7 @@ export function providerToolParts(
     let title: string;
     let output = "";
     let error: string | undefined;
-    let complete = final;
+    let complete = false;
     switch (block?.subtype) {
       case "server_tool_use": {
         if (typeof raw.name !== "string") return;
@@ -228,6 +280,18 @@ export function applyProviderToolResults(content: unknown, parts: Iterable<OCToo
           title: state.status === "running" || state.status === "completed" ? state.title ?? part.tool : part.tool,
           time,
         };
+    updated.push(part);
+  }
+  return updated;
+}
+
+/** Only an actual result (or a self-contained provider status) means success. */
+export function finishProviderToolParts(parts: Iterable<OCToolPart>, timestamp: number, error = "No result"): OCToolPart[] {
+  const updated: OCToolPart[] = [];
+  for (const part of parts) {
+    if (!part.id.includes("_provider_") || (part.state.status !== "pending" && part.state.status !== "running")) continue;
+    const start = part.state.status === "pending" ? timestamp : part.state.time.start;
+    part.state = { status: "error", input: part.state.input, error, time: { start, end: timestamp } };
     updated.push(part);
   }
   return updated;

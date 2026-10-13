@@ -1,0 +1,5 @@
+[
+  {"raw":"{'id': 'repr', 'name': 'web_search', 'input': {'query': \"control\\x1b line\\nnext\\tend\\\\slash'quote\"}, 'flag': True, 'missing': None}","query":"control\u001b line\nnext\tend\\slash'quote"},
+  {"raw":"{'id':'repr','name':'web_search','input':{'query':'\\x41\\u03bb\\U0001f600\\101\\12\\011'}}","query":"Aλ😀A\n\t"},
+  {"raw":"{'id':'repr','name':'web_search','input':{'query':'\\a\\b\\f\\r\\v'}}","query":"\u0007\b\f\r\u000b"}
+]

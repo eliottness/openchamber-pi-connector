@@ -6,6 +6,9 @@ import { join } from "node:path";
 import test from "node:test";
 import { SessionManager, type ManagedSession } from "../src/sessions.js";
 import { SessionStore } from "../src/session-store.js";
+import { AdapterServer } from "../src/server.js";
+import { providerToolParts } from "../src/tool-map.js";
+import { spawnSync } from "node:child_process";
 import type { OCPart, OCToolPart } from "../src/types.js";
 
 const fixture: { content: Array<Record<string, unknown>> } = JSON.parse(
@@ -153,6 +156,7 @@ test("server result in a later assistant message completes the original card liv
   for (const message of messages) {
     manager["onPiEvent"](live, { type: "message_start", message });
     manager["onPiEvent"](live, { type: "message_end", message });
+    if (message.timestamp === 1000) assert.equal(tools(live.messages?.[0]?.parts ?? [])[0]?.state.status, "running");
   }
   manager["onPiEvent"](live, { type: "agent_end" });
   const restored = session(piPath);
@@ -167,3 +171,136 @@ test("server result in a later assistant message completes the original card liv
   assert.equal(history[1]?.parts.length, 1);
   assert.equal(history[1]?.parts[0]?.type, "text");
 });
+
+for (const count of [1, 2]) {
+  for (const withNative of [false, true]) {
+    test(`messages route preserves ${count} expanded task cards with native=${withNative}`, async (t) => {
+      const dir = mkdtempSync(join(tmpdir(), "ocpi-mixed-cards-"));
+      const piPath = join(dir, "session.jsonl");
+      writeFileSync(piPath, JSON.stringify({ type: "message", id: "a", message: { role: "assistant", content: [] } }));
+      const manager = new SessionManager(() => {}, new SessionStore(join(dir, "state")));
+      const server = new AdapterServer({ host: "127.0.0.1", port: 0, defaultDirectory: dir });
+      await server["sessions"].disposeAll();
+      server["sessions"] = manager;
+      t.after(async () => { await server.stop(); rmSync(dir, { recursive: true, force: true }); });
+      const live = session(piPath);
+      manager["sessions"].set(live.info.id, live);
+      await server.start();
+      const items = Array.from({ length: count }, (_, i) => ({ description: `child ${i}`, prompt: `prompt ${i}` }));
+      const args = count === 1 ? items[0] : { tasks: items };
+      const content: Array<Record<string, unknown>> = [
+        { type: "text", text: "Before" }, { type: "toolCall", id: "task_call", name: "task", arguments: args },
+      ];
+      const message = { role: "assistant", timestamp: 1000, content };
+      manager["onPiEvent"](live, { type: "message_start", message });
+      manager["onPiEvent"](live, { type: "message_update", message, assistantMessageEvent: {
+        type: "text_end", contentIndex: 0, content: "Before", partial: message,
+      } });
+      for (const type of ["toolcall_start", "toolcall_end"]) {
+        manager["onPiEvent"](live, { type: "message_update", message, assistantMessageEvent: {
+          type, contentIndex: 1, id: "task_call", toolName: "task",
+          toolCall: { id: "task_call", name: "task", arguments: args }, partial: message,
+        } });
+      }
+      const original = tools(live.messages?.[0]?.parts ?? []).filter((part) => part.tool === "task");
+      assert.equal(original.length, count);
+      if (withNative) content.push(fixture.content[1] ?? {}, fixture.content[5] ?? {});
+      content.push({ type: "text", text: "After" });
+      manager["onPiEvent"](live, { type: "message_update", message, assistantMessageEvent: {
+        type: "text_end", contentIndex: content.length - 1, content: "After", partial: message,
+      } });
+      manager["onPiEvent"](live, { type: "message_end", message });
+      const details = count === 1
+        ? { status: "completed", final_response: "done 0" }
+        : { items: items.map((_, i) => ({ status: "completed", final_response: `done ${i}` })) };
+      manager["onPiEvent"](live, { type: "tool_execution_end", toolCallId: "task_call",
+        result: { details, content: [{ type: "text", text: "done 0" }] } });
+      manager["onPiEvent"](live, { type: "agent_end" });
+      const response = await fetch(`${server.url}/session/${live.info.id}/message`);
+      assert.equal(response.status, 200);
+      const messages: Array<{ parts: OCPart[] }> = await response.json();
+      const returned = tools(messages.flatMap((m) => m.parts)).filter((part) => part.tool === "task");
+      assert.deepEqual(returned.map((part) => part.id), original.map((part) => part.id));
+      returned.forEach((part, i) => {
+        assert.equal(part.id, `prt_task_task_call_${i}`);
+        assert.equal(part.state.input.description, `child ${i}`);
+        assert.equal(part.state.input.prompt, `prompt ${i}`);
+        assert.ok(part.state.status === "completed");
+        assert.equal(part.state.output, `done ${i}`);
+      });
+      assert.deepEqual(messages[0]?.parts.filter((p) => p.type === "text").map((p) => p.text), ["Before", "After"]);
+      assert.deepEqual(messages[0]?.parts.map((part) => part.type),
+        ["text", ...Array(count).fill("tool"), ...(withNative ? ["tool"] : []), "text"]);
+    });
+  }
+}
+
+test("malformed repr parsing is bounded even for escaped quotes without a closing quote", { timeout: 3000 }, () => {
+  // Run in a child so the watchdog can stop the old synchronous quadratic scan.
+  const probe = `
+    import { providerToolParts } from './src/tool-map.ts';
+    const started = performance.now();
+    for (const length of [32000, 256000, 2000000]) {
+      const raw = String.fromCharCode(92, 34).repeat(length / 2);
+      if (providerToolParts([{type:'providerNative',subtype:'server_tool_use',raw}], 's','m',0).size !== 0) process.exit(2);
+    }
+    console.log(JSON.stringify({ms:performance.now()-started}));
+  `;
+  const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", probe], {
+    cwd: process.cwd(), encoding: "utf8", timeout: 2000,
+  });
+  assert.equal(result.error, undefined, `parser exceeded watchdog: ${result.error?.message}`);
+  assert.equal(result.status, 0, result.stderr);
+  const timing: { ms: number } = JSON.parse(result.stdout);
+  assert.ok(timing.ms < 500, `malformed parser took ${timing.ms}ms`);
+  // A query exceeding the explicit raw cap is not parsed even when valid.
+  assert.equal(providerToolParts([{ type: "providerNative", subtype: "server_tool_use",
+    raw: JSON.stringify({ id: "large", name: "web_search", input: { query: "a".repeat(2_000_000) } }) }],
+  "s", "m", 0).size, 0);
+});
+
+test("Python repr escapes preserve the exact query rather than dropping valid calls", () => {
+  const fixture: Array<{ raw: string; query: string }> = JSON.parse(
+    readFileSync(new URL("./fixtures/provider-python-repr.json", import.meta.url), "utf8"));
+  for (const sample of fixture) {
+    const part = providerToolParts([{ type: "providerNative", subtype: "server_tool_use", raw: sample.raw }],
+      "s", "m", 0).get(0);
+    assert.ok(part, sample.raw);
+    assert.equal(part.state.input.query, sample.query);
+  }
+  for (const query of [String.raw`\xGG`, String.raw`\u123`, String.raw`\U00110000`]) {
+    assert.equal(providerToolParts([{ type: "providerNative", subtype: "server_tool_use",
+      raw: `{'id':'bad','name':'web_search','input':{'query':'${query}'}}` }], "s", "m", 0).size, 0);
+  }
+});
+
+for (const reason of ["toolUse", "stop", "aborted", "error"]) {
+  test(`unresolved server call with ${reason} is never successful live or in history`, async (t) => {
+    const dir = mkdtempSync(join(tmpdir(), "ocpi-native-incomplete-"));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const piPath = join(dir, "session.jsonl");
+    const message = { role: "assistant", timestamp: 1000, stopReason: reason, content: [fixture.content[1]] };
+    writeFileSync(piPath, JSON.stringify({ type: "message", id: "a", message }));
+    const manager = new SessionManager(() => {}, new SessionStore(join(dir, "state")));
+    t.after(() => manager.disposeAll());
+    const live = session(piPath);
+    manager["onPiEvent"](live, { type: "message_start", message });
+    manager["onPiEvent"](live, { type: "message_end", message });
+    if (reason === "toolUse" || reason === "stop") {
+      assert.equal(tools(live.messages?.[0]?.parts ?? [])[0]?.state.status, "running");
+    }
+    if (reason !== "toolUse") manager["onPiEvent"](live, { type: "agent_end" });
+    const restored = session(piPath);
+    restored.messages = undefined;
+    for (const cards of [tools(live.messages?.[0]?.parts ?? []), tools(manager["ensureMessages"](restored)[0]?.parts ?? [])]) {
+      const part = cards[0];
+      assert.ok(part);
+      assert.notEqual(part.state.status, "completed");
+      if (reason === "toolUse") assert.equal(part.state.status, "running");
+      else {
+        assert.ok(part.state.status === "error");
+        assert.equal(part.state.error, reason === "aborted" ? "Cancelled" : "No result");
+      }
+    }
+  });
+}

@@ -12,7 +12,7 @@ import { setThinkingLevel, type ModelSelection, type ThinkingState } from "./thi
 import { SessionLifecycle, type LifecycleOptions } from "./lifecycle.js";
 import { ApprovalBridge, extensionUiRequestFrom, type PendingPermission, type PendingQuestion } from "./approvals.js";
 import { getAgentName } from "./agent-name.js";
-import { applyProviderToolResults, mapTool, providerToolParts, resultMetadata, resultText } from "./tool-map.js";
+import { applyProviderToolResults, finishProviderToolParts, mapTool, providerToolParts, resultMetadata, resultText } from "./tool-map.js";
 import { TodoBridge, type Todo, type TodoUpdated } from "./todo-bridge.js";
 import { bindMessageEntries, forkConversation, getEntries, navigate, recordTurn, restoreLocalShellTurns, revertConversation, revertNotice, SessionTreeError, unrevertConversation, type SessionTreeState } from "./session-tree.js";
 import { SubagentBridge, taskParts, updateTaskParts, taskCompletions } from "./subagents.js";
@@ -1147,9 +1147,13 @@ export class SessionManager {
         break;
 
       case "message_end": {
-        const ended = ev.message as { role?: string; usage?: PiUsage; provider?: unknown; model?: unknown; responseModel?: unknown } | undefined;
+        const ended = ev.message as { role?: string; stopReason?: string; usage?: PiUsage; provider?: unknown; model?: unknown; responseModel?: unknown } | undefined;
         if (ended?.role === "assistant" && s.streaming) {
-          this.onProviderTools(s, ev.message, true);
+          this.onProviderTools(s, ev.message);
+          if (ended.stopReason === "aborted" || ended.stopReason === "error") {
+            for (const part of finishProviderToolParts(s.toolByCallId.values(), Date.now(),
+              ended.stopReason === "aborted" ? "Cancelled" : "No result")) this.emitPart(s, part);
+          }
           // Last chance to correct attribution: some providers only reveal the
           // concrete model once the stream has closed.
           if (this.applyPiModel(s, ended.provider, piModelId(ended.responseModel, ended.model)) && s.model !== undefined) {
@@ -1198,7 +1202,7 @@ export class SessionManager {
     const ame = ev.assistantMessageEvent as
       | { type: string; partial?: unknown; contentIndex?: number; delta?: string; content?: string; id?: string; toolName?: string; toolCall?: { id?: string; name?: string; arguments?: Record<string, unknown> } }
       | undefined;
-    this.onProviderTools(s, ev.message ?? ame?.partial, false);
+    this.onProviderTools(s, ev.message ?? ame?.partial);
     if (!ame || ame.contentIndex === undefined) return;
 
     if (ame.type.startsWith("toolcall_")) {
@@ -1237,12 +1241,12 @@ export class SessionManager {
     this.emit(dir, { type: "message.updated", properties: { info: streaming.message } });
   }
 
-  private onProviderTools(s: ManagedSession, message: unknown, final: boolean): void {
+  private onProviderTools(s: ManagedSession, message: unknown): void {
     const streaming = s.streaming;
     if (!streaming || message === null || typeof message !== "object") return;
     const snapshot = message as { content?: unknown; timestamp?: unknown };
     const timestamp = typeof snapshot.timestamp === "number" ? snapshot.timestamp : streaming.message.time.created;
-    const mapped = providerToolParts(snapshot.content, s.info.id, streaming.message.id, timestamp, final);
+    const mapped = providerToolParts(snapshot.content, s.info.id, streaming.message.id, timestamp);
     for (const [index, part] of mapped) {
       streaming.parts.set(index, part);
       s.toolByCallId.set(part.callID, part);
@@ -1253,7 +1257,18 @@ export class SessionManager {
     }
     const owner = s.messages?.find((m) => m.info.id === streaming.message.id);
     if (owner && mapped.size > 0) {
-      owner.parts = [...streaming.parts].sort(([a], [b]) => a - b).map(([, part]) => part);
+      for (const part of mapped.values()) {
+        const index = owner.parts.findIndex((existing) => existing.id === part.id);
+        if (index < 0) owner.parts.push(part);
+        else owner.parts[index] = part;
+      }
+      // Task expansion replaces the streaming placeholder with one or more
+      // cards sharing its callID. Order those cards without reconstructing it.
+      const indices = new Map([...streaming.parts].map(([index, part]) =>
+        [part.type === "tool" ? part.callID : part.id, index]));
+      owner.parts.sort((a, b) =>
+        (indices.get(a.type === "tool" ? a.callID : a.id) ?? Infinity) -
+        (indices.get(b.type === "tool" ? b.callID : b.id) ?? Infinity));
     }
   }
 
@@ -1387,6 +1402,7 @@ export class SessionManager {
 
   /** Tool parts that never received a result (abort, crash) must not spin forever. */
   private finalizeDanglingTools(s: ManagedSession): void {
+    for (const part of finishProviderToolParts(s.toolByCallId.values(), Date.now())) this.emitPart(s, part);
     for (const part of s.toolByCallId.values()) {
       if (part.state.status === "completed" || part.state.status === "error") continue;
       const startedAt = part.state.status !== "pending" ? part.state.time.start : Date.now();
@@ -1643,7 +1659,7 @@ function parsePiSessionText(s: ManagedSession, agentName: string, raw: string): 
       };
       const parts: OCPart[] = [];
       const blocks = Array.isArray(m.content) ? m.content : [];
-      const providerParts = providerToolParts(blocks, sessionID, msgId, typeof m.timestamp === "number" ? m.timestamp : created, true);
+      const providerParts = providerToolParts(blocks, sessionID, msgId, typeof m.timestamp === "number" ? m.timestamp : created);
       blocks.forEach((block, b) => {
         const partId = `prt_${sessionID}_r${idx}_${b}`;
         const kind = block?.type;
@@ -1714,6 +1730,12 @@ function parsePiSessionText(s: ManagedSession, agentName: string, raw: string): 
       continue;
     }
     // system / custom entries are not rendered
+  }
+  const lastAssistant = [...chain].reverse().find((entry) => entry.message?.role === "assistant");
+  const stopReason = lastAssistant?.message?.stopReason;
+  if (lastAssistant !== undefined && ["stop", "length", "error", "aborted"].includes(stopReason ?? "")) {
+    finishProviderToolParts([...toolParts.values()].flat(), entryTime(lastAssistant),
+      stopReason === "aborted" ? "Cancelled" : "No result");
   }
   s.todoBridge = new TodoBridge(sessionID);
   s.todoBridge.restore(entries, new Map([...toolParts].flatMap(([callID, parts]) => (parts[0] ? [[callID, parts[0]] as const] : []))));

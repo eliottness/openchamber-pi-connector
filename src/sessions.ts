@@ -14,7 +14,7 @@ import { ApprovalBridge, extensionUiRequestFrom, type PendingPermission, type Pe
 import { getAgentName } from "./agent-name.js";
 import { applyProviderToolResults, finishProviderToolParts, mapTool, providerToolParts, resultMetadata, resultText } from "./tool-map.js";
 import { TodoBridge, type Todo, type TodoUpdated } from "./todo-bridge.js";
-import { bindMessageEntries, forkConversation, getEntries, navigate, pruneLocalShellTurns, reconcileShellTurns, recordTurn, restoreLocalShellTurns, shellTurnsOnBranch, revertConversation, revertNotice, SessionTreeError, unrevertConversation, type Entries, type TreeEntry, type SessionTreeState } from "./session-tree.js";
+import { bindMessageEntries, forkConversation, getEntries, hasInterruptedShellTurn, navigate, pruneLocalShellTurns, reconcileShellTurns, recordTurn, restoreLocalShellTurns, shellTurnsOnBranch, revertConversation, revertNotice, SessionTreeError, unrevertConversation, type Entries, type TreeEntry, type SessionTreeState } from "./session-tree.js";
 import { SubagentBridge, taskParts, updateTaskParts, taskCompletions } from "./subagents.js";
 import { sessionDiff, touchedFiles } from "./session-diff.js";
 import { announceSessionNotice, shellTitle, shellUserMessage } from "./session-commands.js";
@@ -375,6 +375,7 @@ export class SessionManager {
   private async syncTree(s: ManagedSession) {
     const pi = s.pi;
     if (!pi) throw new SessionTreeError("Session has no OmO process");
+    if (hasInterruptedShellTurn(s)) await this.reloadMessagesLive(s);
     this.ensureMessages(s);
     const tree = await getEntries(pi);
     bindMessageEntries(s, tree);
@@ -413,7 +414,11 @@ export class SessionManager {
       child.model = s.model;
       const childTree = await getEntries(pi);
       child.tree.leafId = childTree.leafId;
-      child.tree.localShellTurns = shellTurnsOnBranch(s, childTree).map((turn, index) => {
+      const boundary = messageID === undefined ? undefined : s.tree.messageEntries[messageID];
+      child.tree.localShellTurns = shellTurnsOnBranch(s, childTree).filter((turn) =>
+        s.tree.shellDispatch?.[turn.messages[1].info.id] === false &&
+        turn.messages.every((message) => s.tree.messageEntries[message.info.id] === undefined) &&
+        turn.afterEntryId !== boundary).map((turn, index) => {
         const messages = structuredClone(turn.messages);
         const stem = `msg_${child.info.id}_local${index}`;
         for (const [position, message] of messages.entries()) {
@@ -864,7 +869,10 @@ export class SessionManager {
     const restored = s.restored;
     if (restored === undefined) throw new Error(`session is not restorable: ${s.info.id}`);
     if (!existsSync(restored.piPath)) throw new Error(`pi session file is gone: ${restored.piPath}`);
-    if (s.recoverShellTurns) this.ensureMessages(s);
+    if (hasInterruptedShellTurn(s)) {
+      s.messages = undefined;
+      this.ensureMessages(s);
+    } else if (s.recoverShellTurns) this.ensureMessages(s);
     await this.lifecycle.makeRoom();
     const pi = new PiRpcClient({ cwd: s.info.directory, args: ["--session", restored.piPath], clock: this.lifecycle.clock });
     const state = await pi.command<PiState>({ type: "get_state" }).catch(async (error: unknown) => {
@@ -1587,7 +1595,7 @@ function parsePiSessionText(s: ManagedSession, agentName: string, raw: string): 
   for (const e of entries) if (typeof e.id === "string") byId.set(e.id, e);
 
   let leaf = [...entries].reverse().find((entry) => entry.type !== "session" && typeof entry.id === "string");
-  const recoveringDispatch = s.recoverShellTurns && s.tree.localShellTurns?.some((turn) =>
+  const recoveringDispatch = (s.recoverShellTurns || hasInterruptedShellTurn(s)) && s.tree.localShellTurns?.some((turn) =>
     s.tree.shellDispatch?.[turn.messages[1].info.id] === true && s.tree.messageEntries[turn.messages[1].info.id] === undefined);
   const selectedLeaf = s.tree.revert ? s.tree.revert.previousLeafId : recoveringDispatch ? undefined : s.tree.leafId;
   if (selectedLeaf !== undefined) leaf = selectedLeaf === null ? undefined : byId.get(selectedLeaf);

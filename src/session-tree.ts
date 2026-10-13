@@ -34,6 +34,14 @@ export interface Entries {
 
 export class SessionTreeError extends Error {}
 
+export function hasInterruptedShellTurn(s: ManagedSession): boolean {
+  return s.tree.localShellTurns?.some((turn) =>
+    s.tree.shellDispatch?.[turn.messages[1].info.id] === true &&
+    s.tree.messageEntries[turn.messages[1].info.id] === undefined &&
+    turn.messages[1].parts.some((part) => part.type === "tool" && part.state.status === "error" &&
+      part.state.metadata?.interrupted === true)) ?? false;
+}
+
 export function shellTurnsOnBranch(s: ManagedSession, tree: Entries) {
   const ids = new Set(branchEntries(tree).map((entry) => entry.id));
   return (s.tree.localShellTurns ?? []).filter((turn) => turn.afterEntryId === null || ids.has(turn.afterEntryId));

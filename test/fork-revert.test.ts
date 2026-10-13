@@ -224,6 +224,101 @@ test("forks copy only local shell turns on their native path with child identiti
   assert.equal(cold.messages(info.id)?.filter((message) => message.parts.some((part) => part.type === "tool" && part.tool === "bash")).length, 2);
 });
 
+for (const boundary of ["complete", "assistant", "user"] as const) {
+  test(`a dispatched cancellation forks once at its ${boundary} boundary through restart`, { timeout: 30_000 }, async (t) => {
+    const { manager, dir, state } = setup(t);
+    const info = await manager.create(dir);
+    await manager.prompt(info.id, "before", undefined, false, "msg_before");
+    const session = manager.get(info.id);
+    assert.ok(session?.pi);
+    execFileSync("mkfifo", [join(dir, "boundary-gate")]);
+    const started = Promise.withResolvers<void>();
+    const finished = Promise.withResolvers<void>();
+    session.pi.onEvent((event) => {
+      if (event.type === "fake_bash_started") started.resolve();
+      if (event.type === "fake_bash_finished") finished.resolve();
+    });
+    const command = "IFS= read -r x < boundary-gate; echo done";
+    const pending = runShellCommand({ sessions: manager, session, command, emit: () => {} });
+    await started.promise;
+    await manager.abort(info.id);
+    const result = await pending;
+    await finished.promise;
+    assert.equal(result.kind, "completed");
+    const child = await manager.fork(info.id, boundary === "complete" ? undefined :
+      boundary === "assistant" ? result.message.info.id : result.message.info.parentID);
+    const expected = boundary === "user" ? 0 : 1;
+    const count = (owner: SessionManager) => owner.messages(child.id)?.filter((message) =>
+      message.parts.some((part) => part.type === "tool" && part.tool === "bash" && part.state.input.command === command)).length;
+    const pi = manager.get(child.id)?.pi;
+    assert.ok(pi);
+    assert.equal(branchEntries(await getEntries(pi)).filter((entry) => entry.message?.role === "bashExecution").length, expected);
+    assert.equal(count(manager), expected);
+    await manager.disposeAll();
+    const cold = new SessionManager(() => {}, new SessionStore(state), dir);
+    t.after(() => cold.disposeAll());
+    assert.equal(count(cold), expected);
+  });
+}
+
+test("a fork at a native shell excludes local attempts after that boundary", { timeout: 30_000 }, async (t) => {
+  const { manager, dir, state } = setup(t);
+  const info = await manager.create(dir);
+  await manager.prompt(info.id, "before", undefined, false, "msg_before");
+  const session = manager.get(info.id);
+  assert.ok(session);
+  const executed = await runShellCommand({ sessions: manager, session, command: "echo included", emit: () => {} });
+  assert.equal(executed.kind, "completed");
+  await manager.reloadMessages(info.id);
+  const queued = await cancelQueuedShell(t, manager, session, "echo excluded-local");
+  const child = await manager.fork(info.id, executed.message.info.id);
+  const commands = (owner: SessionManager) => owner.messages(child.id)?.flatMap((message) =>
+    message.parts.flatMap((part) => part.type === "tool" && part.tool === "bash" ? [part.state.input.command] : []));
+  assert.deepEqual(commands(manager), ["echo included"]);
+  await manager.disposeAll();
+  const cold = new SessionManager(() => {}, new SessionStore(state), dir);
+  t.after(() => cold.disposeAll());
+  assert.deepEqual(commands(cold), ["echo included"]);
+  assert.ok(cold.messages(info.id)?.some((message) => message.info.id === queued.info.id));
+});
+
+for (const action of ["refresh", "fork"] as const) {
+  test(`an interrupted identity reconciles a late native result on warm ${action}`, { timeout: 30_000 }, async (t) => {
+    const { manager, dir, state } = setup(t);
+    const info = await manager.create(dir);
+    await manager.prompt(info.id, "before", undefined, false, "msg_before");
+    const session = manager.get(info.id);
+    assert.ok(session?.pi);
+    execFileSync("mkfifo", [join(dir, "late-gate")]);
+    const started = Promise.withResolvers<void>();
+    session.pi.onEvent((event) => { if (event.type === "fake_bash_started") started.resolve(); });
+    const pending = runShellCommand({ sessions: manager, session, command: "IFS= read -r x < late-gate; echo late-native", emit: () => {} });
+    await started.promise;
+    const live = session.messages?.at(-1);
+    assert.ok(live?.info.role === "assistant");
+    const saved = new SessionStore(state).get(info.id);
+    assert.ok(saved);
+    const snapshot = new SessionStore(join(dir, "late-state"));
+    snapshot.set(info.id, saved);
+    const cold = new SessionManager(() => {}, snapshot, dir);
+    t.after(() => cold.disposeAll());
+    const initial = cold.messages(info.id)?.find((message) => message.info.id === live.info.id);
+    assert.ok(initial?.parts[0]?.type === "tool" && initial.parts[0].state.status === "error");
+    assert.equal(initial.parts[0].state.metadata?.interrupted, true);
+    execFileSync("/bin/sh", ["-c", "printf 'release\\n' > late-gate"], { cwd: dir });
+    const completed = await pending;
+    assert.equal(completed.kind, "completed");
+    if (action === "refresh") await cold.reloadMessages(info.id);
+    else await cold.fork(info.id, live.info.id);
+    const restored = cold.messages(info.id)?.find((message) => message.info.id === live.info.id);
+    assert.ok(restored?.parts[0]?.type === "tool" && restored.parts[0].state.status === "completed");
+    assert.equal(restored.parts[0].state.output, "late-native\n");
+    assert.equal(restored.info.role === "assistant" && restored.info.parentID, live.info.parentID);
+    assert.equal(cold.messages(info.id)?.filter((message) => message.parts.some((part) =>
+      part.type === "tool" && part.tool === "bash")).length, 1);
+  });
+}
+
 test("a never-dispatched cancelled shell cannot claim an identical successful run", { timeout: 30_000 }, async (t) => {
   const { manager, dir, state } = setup(t);
   const info = await manager.create(dir);

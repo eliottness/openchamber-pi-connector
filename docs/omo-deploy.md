@@ -33,6 +33,21 @@ TimeoutStopSec=20
 The UI password remains in the existing service unit. Do not copy it into the
 drop-in or this document.
 
+## Private-host teardown prerequisite
+
+On Linux, connector-owned OmO task hosts require `/bin/python3` with
+`os.pidfd_open` and `signal.pidfd_send_signal` (Python 3.9+, Linux 5.3+).
+The WSL2 deployment has Python 3.12 and Linux 6.18. Node 22 has no pidfd API,
+so shutdown starts one isolated, standard-library-only Python helper, bounded
+to 15 seconds. It inherits the verified hosts' open proc directories, opens
+and validates pidfds, then uses only those pidfds for TERM/KILL and exit
+notifications. It does not signal a service cgroup or a shared LSP daemon.
+
+This is an operating-system runtime dependency, not an npm dependency. If
+Python or pidfd support is unavailable, private-host teardown rejects with an
+error and sends no host signals; it never falls back to numeric PID signalling.
+Keep this prerequisite when moving the service to another machine.
+
 ## Child transcripts and empty Changes bodies
 
 OmO process-backed children report `host_session.session_path`. In-process

@@ -108,6 +108,33 @@ test("restart retains live ids and reverted transcript then a prompt branches fr
   assert.equal(s.info.revert, undefined);
 });
 
+test("compaction preserves the active revert leaf and original history across refresh and restart", async (t) => {
+  const { manager, dir, state } = setup(t);
+  const { s, id, tree } = await turns(manager, dir);
+  await manager.revert(id, "msg_live_3");
+  const pinnedLeaf = s.tree.leafId;
+  const revert = { ...s.tree.revert };
+  const response = await manager.sessionRpc(id, { type: "compact" });
+  assert.equal(response.success, true);
+  assert.equal(s.tree.leafId, pinnedLeaf);
+  assert.deepEqual(s.tree.revert, revert);
+  assert.ok(s.pi);
+  assert.equal((await getEntries(s.pi)).leafId, pinnedLeaf);
+  assert.doesNotMatch(JSON.stringify(manager.messages(id)), /Compacted summary/);
+  await manager.disposeAll();
+
+  const restarted = new SessionManager(() => undefined, new SessionStore(state), dir);
+  t.after(() => restarted.disposeAll());
+  assert.equal(restarted.get(id)?.tree.leafId, pinnedLeaf);
+  assert.deepEqual(restarted.get(id)?.tree.revert, revert);
+  assert.ok(restarted.messages(id)?.some((message) => message.info.id === "msg_live_3"));
+  await restarted.unrevert(id);
+  const restored = restarted.get(id);
+  assert.ok(restored?.pi);
+  assert.equal((await getEntries(restored.pi)).leafId, tree.leafId);
+  assert.doesNotMatch(JSON.stringify(restarted.messages(id)), /Compacted summary/);
+});
+
 test("restored offset ids support fork and reverting the first root message", async (t) => {
   const { manager, dir, state } = setup(t);
   const { id, s } = await turns(manager, dir);

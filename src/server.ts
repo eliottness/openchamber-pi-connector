@@ -4,7 +4,7 @@
 
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
 import { randomUUID } from "node:crypto";
-import { appendFileSync } from "node:fs";
+import { debugLog, miscRoute } from "./misc-routes.js";
 import { execFile } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { SessionManager } from "./sessions.js";
@@ -12,6 +12,16 @@ import { ApprovalInputError, toV2Permission } from "./approvals.js";
 import type { TodoUpdated } from "./todo-bridge.js";
 import { getAgentName, getExposedAgentNames } from "./agent-name.js";
 import { loadCatalog, type Catalog } from "./catalog.js";
+import {
+  announceSessionError,
+  compactSession,
+  getCommands,
+  parseShellCommand,
+  parseSlashCommand,
+  runShellCommand,
+  runSlashCommand,
+  unsupportedShare,
+} from "./session-commands.js";
 import {
   defaultV2Model,
   flattenModels,
@@ -21,8 +31,6 @@ import {
   type V2Session,
 } from "./v2.js";
 import type { OCEvent, OCModelRef, OCPromptBody, OCSession } from "./types.js";
-
-const DEBUG_LOG = process.env.OCPI_DEBUG_LOG ?? "/tmp/openchamber-pi-debug.log";
 
 // This connector is not opencode — it only implements an OpenCode API subset.
 // OpenChamber reads /global/health's `version` as the installed opencode version
@@ -41,10 +49,6 @@ function applyArchivedFilter(sessions: OCSession[], archived: string | null) {
   if (archived === "true") return sessions.filter((s) => s.time.archived !== undefined);
   if (archived === "false") return sessions.filter((s) => s.time.archived === undefined);
   return sessions;
-}
-
-function debugLog(line: string): void {
-  if (process.env.OCPI_DEBUG) appendFileSync(DEBUG_LOG, line + "\n");
 }
 
 function numberParam(value: string | null): number | undefined {
@@ -162,7 +166,7 @@ export class AdapterServer {
   private async route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     debugLog(`[http] ${req.method} ${req.url}`);
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-opencode-directory");
     if (req.method === "OPTIONS") {
       res.writeHead(204).end();
@@ -223,6 +227,11 @@ export class AdapterServer {
     }
 
     // --- sessions ---
+    const misc = await miscRoute(method, path, url, directory);
+    if (misc !== undefined) {
+      this.json(res, misc.status, misc.body);
+      return;
+    }
     if (path === "/session" && method === "POST") {
       const body = (await this.body(req)) as { parentID?: string; title?: string };
       this.json(res, 200, await this.sessions.create(directory, body.title, body.parentID));
@@ -243,24 +252,32 @@ export class AdapterServer {
     const sessionMatch = path.match(/^\/session\/([^/]+)(\/.*)?$/);
     if (sessionMatch) {
       const [, sessionId, sub] = sessionMatch;
-      if (!this.sessions.get(sessionId!)) {
+      if (sessionId === undefined) {
+        this.json(res, 404, { name: "NotFoundError", data: { message: `session not found: ${sessionId}` } });
+        return;
+      }
+      const managed = this.sessions.get(sessionId);
+      if (!managed) {
         this.json(res, 404, { name: "NotFoundError", data: { message: `session not found: ${sessionId}` } });
         return;
       }
       switch (`${method} ${sub ?? ""}`) {
+        case "GET /diff":
+          this.json(res, 200, await this.sessions.diff(sessionId!));
+          return;
         case "GET ":
-          this.json(res, 200, this.sessions.get(sessionId!)!.info);
+          this.json(res, 200, managed.info);
           return;
         case "PATCH ": {
           const body = (await this.body(req)) as { title?: string; time?: { archived?: number } };
-          this.json(res, 200, this.sessions.update(sessionId!, { title: body.title, archived: body.time?.archived }));
+          this.json(res, 200, this.sessions.update(sessionId, { title: body.title, archived: body.time?.archived }));
           return;
         }
         case "DELETE ":
-          this.json(res, 200, await this.sessions.remove(sessionId!));
+          this.json(res, 200, await this.sessions.remove(sessionId));
           return;
         case "GET /message":
-          this.json(res, 200, this.sessions.messages(sessionId!));
+          this.json(res, 200, this.sessions.messages(sessionId));
           return;
         case "GET /todo":
           this.json(res, 200, this.sessions.todos(sessionId!));
@@ -269,9 +286,9 @@ export class AdapterServer {
           const body = (await this.body(req)) as OCPromptBody;
           const text = (body.parts ?? [])
             .filter((p) => p.type === "text" && typeof p.text === "string")
-            .map((p) => p.text!)
+            .map((p) => p.text ?? "")
             .join("\n");
-          void this.sessions.prompt(sessionId!, text, body.model, body.noReply, body.messageID).catch(() => undefined);
+          void this.sessions.prompt(sessionId, text, body.model, body.noReply, body.messageID).catch(() => undefined);
           res.writeHead(204).end();
           return;
         }
@@ -279,15 +296,15 @@ export class AdapterServer {
           const body = (await this.body(req)) as OCPromptBody;
           const text = (body.parts ?? [])
             .filter((p) => p.type === "text" && typeof p.text === "string")
-            .map((p) => p.text!)
+            .map((p) => p.text ?? "")
             .join("\n");
-          await this.sessions.prompt(sessionId!, text, body.model, body.noReply, body.messageID);
-          const msgs = this.sessions.messages(sessionId!) ?? [];
+          await this.sessions.prompt(sessionId, text, body.model, body.noReply, body.messageID);
+          const msgs = this.sessions.messages(sessionId) ?? [];
           this.json(res, 200, msgs[msgs.length - 1] ?? null);
           return;
         }
         case "POST /abort":
-          this.json(res, 200, await this.sessions.abort(sessionId!));
+          this.json(res, 200, await this.sessions.abort(sessionId));
           return;
         case "POST /fork":
         case "POST /revert":
@@ -309,6 +326,70 @@ export class AdapterServer {
           } catch (error) {
             this.json(res, 400, { name: "SessionTreeError", data: { message: error instanceof Error ? error.message : String(error) } });
           }
+          return;
+        }
+        case "POST /summarize": {
+          await this.body(req);
+          const result = await compactSession(this.sessions, sessionId);
+          if (result.kind === "error") {
+            announceSessionError(
+              { sessions: this.sessions, session: managed, emit: this.broadcast.bind(this) },
+              "BadRequestError",
+              result.message,
+            );
+            this.json(res, 400, { name: "BadRequestError", data: { message: result.message } });
+            return;
+          }
+          this.json(res, 200, true);
+          return;
+        }
+        case "POST /shell": {
+          const command = parseShellCommand(await this.body(req));
+          if (command === undefined) {
+            this.json(res, 400, { name: "BadRequestError", data: { message: "command is required" } });
+            return;
+          }
+          const managed = this.sessions.get(sessionId);
+          if (!managed) {
+            this.json(res, 404, { name: "NotFoundError", data: { message: `session not found: ${sessionId}` } });
+            return;
+          }
+          if (managed.status.type !== "idle") {
+            this.json(res, 409, { name: "SessionBusyError", data: { message: "session is busy" } });
+            return;
+          }
+          const result = await runShellCommand({
+            sessions: this.sessions,
+            session: managed,
+            command,
+            emit: this.broadcast.bind(this),
+          });
+          if (result.kind === "error") {
+            this.json(res, 400, { name: "BadRequestError", data: { message: result.message } });
+            return;
+          }
+          this.json(res, 200, result.message.info);
+          return;
+        }
+        case "POST /command": {
+          const input = parseSlashCommand(await this.body(req));
+          if (input === undefined) {
+            this.json(res, 400, { name: "BadRequestError", data: { message: "command is required" } });
+            return;
+          }
+          const message = await runSlashCommand(this.sessions, sessionId, input);
+          this.json(res, 200, message === undefined ? { info: null, parts: [] } : { info: message.info, parts: message.parts });
+          return;
+        }
+        case "POST /share":
+        case "DELETE /share": {
+          const session = this.sessions.get(sessionId);
+          if (session) announceSessionError(
+            { sessions: this.sessions, session, emit: this.broadcast.bind(this) },
+            unsupportedShare.name,
+            unsupportedShare.data.message,
+          );
+          this.json(res, 400, unsupportedShare);
           return;
         }
         default:
@@ -348,9 +429,8 @@ export class AdapterServer {
       // OpenChamber page-loads the sidebar through this route (not /session) with
       // ?directory=…&archived=…&roots=…&limit=…. Honor directory/roots/archived:
       // ignoring them left the sidebar with only live sessions, so restored
-      // history never appeared after a restart; ignoring `archived` broke the
-      // archive tab (it must show only time.archived sessions, while the normal
-      // sidebar's archived=false must exclude them).
+      // history never appeared after a restart. archived=false excludes archived
+      // sessions; archived=true includes them so the UI can partition both lists.
       const directoryParam =
         url.searchParams.get("directory") ?? (req.headers["x-opencode-directory"] as string | undefined);
       const rootsOnly = url.searchParams.get("roots") === "true";
@@ -359,7 +439,12 @@ export class AdapterServer {
           ? this.sessions.list(directoryParam)
           : this.sessions.listAll();
       if (rootsOnly) sessions = sessions.filter((s) => s.parentID === undefined);
-      sessions = applyArchivedFilter(sessions, url.searchParams.get("archived"));
+      // Experimental lists use archived=true to INCLUDE archived sessions.
+      // The UI partitions this result itself; filtering to archived-only drops
+      // the current live session from the header's global metadata store.
+      if (url.searchParams.get("archived") === "false") {
+        sessions = sessions.filter((s) => s.time.archived === undefined);
+      }
       this.json(res, 200, sessions);
       return;
     }
@@ -419,7 +504,7 @@ export class AdapterServer {
       return;
     }
     if (path === "/command" && method === "GET") {
-      this.json(res, 200, []);
+      this.json(res, 200, await getCommands(directory));
       return;
     }
     if (path === "/path" && method === "GET") {
@@ -553,7 +638,7 @@ export class AdapterServer {
       return;
     }
     if (path === "/api/command" && method === "GET") {
-      this.json(res, 200, withLocation([]));
+      this.json(res, 200, withLocation(await getCommands(directory)));
       return;
     }
     if (path === "/api/skill" && method === "GET") {
@@ -770,6 +855,65 @@ export class AdapterServer {
           this.json(res, 200, { data: messages, cursor: { previous: null, next: null } });
           return;
         }
+        case "POST /summarize": {
+          await this.body(req);
+          const result = await compactSession(this.sessions, sessionId);
+          if (result.kind === "error") {
+            announceSessionError(
+              { sessions: this.sessions, session: managed, emit: this.broadcast.bind(this) },
+              "BadRequestError",
+              result.message,
+            );
+            this.json(res, 400, { name: "BadRequestError", data: { message: result.message } });
+            return;
+          }
+          this.json(res, 200, { data: true });
+          return;
+        }
+        case "POST /shell": {
+          const command = parseShellCommand(await this.body(req));
+          if (command === undefined) {
+            this.json(res, 400, { name: "BadRequestError", data: { message: "command is required" } });
+            return;
+          }
+          if (managed.status.type !== "idle") {
+            this.json(res, 409, { name: "SessionBusyError", data: { message: "session is busy" } });
+            return;
+          }
+          const result = await runShellCommand({
+            sessions: this.sessions,
+            session: managed,
+            command,
+            emit: this.broadcast.bind(this),
+          });
+          if (result.kind === "error") {
+            this.json(res, 400, { name: "BadRequestError", data: { message: result.message } });
+            return;
+          }
+          this.json(res, 200, { data: toV2Message(result.message) });
+          return;
+        }
+        case "POST /command": {
+          const input = parseSlashCommand(await this.body(req));
+          if (input === undefined) {
+            this.json(res, 400, { name: "BadRequestError", data: { message: "command is required" } });
+            return;
+          }
+          const message = await runSlashCommand(this.sessions, sessionId, input);
+          this.json(res, 200, {
+            data: message === undefined ? { info: null, parts: [] } : { info: toV2Message(message), parts: message.parts },
+          });
+          return;
+        }
+        case "POST /share":
+        case "DELETE /share":
+          announceSessionError(
+            { sessions: this.sessions, session: managed, emit: this.broadcast.bind(this) },
+            unsupportedShare.name,
+            unsupportedShare.data.message,
+          );
+          this.json(res, 400, unsupportedShare);
+          return;
         case "POST /prompt": {
           const body = (await this.body(req)) as {
             id?: string;
@@ -852,6 +996,8 @@ export class AdapterServer {
           return;
         }
         case "GET /diff":
+          this.json(res, 200, { data: await this.sessions.diff(sessionId) });
+          return;
         case "GET /context": {
           this.json(res, 501, { name: "NotImplemented", data: { message: `${method} ${path} is not implemented by this connector` } });
           return;

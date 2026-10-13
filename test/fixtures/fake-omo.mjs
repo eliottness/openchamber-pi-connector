@@ -89,6 +89,7 @@ input.on("line", (line) => {
     model = { provider: command.provider, id: command.modelId };
     data = model;
   }
+  if (command.type === "compact") record("assistant", "Compacted summary");
   if (command.type === "prompt") {
     record("user", command.message);
     send({ type: "agent_start" });

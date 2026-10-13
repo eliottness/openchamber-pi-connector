@@ -14,7 +14,7 @@ import { ApprovalBridge, extensionUiRequestFrom, type PendingPermission, type Pe
 import { getAgentName } from "./agent-name.js";
 import { applyProviderToolResults, finishProviderToolParts, mapTool, providerToolParts, resultMetadata, resultText } from "./tool-map.js";
 import { TodoBridge, type Todo, type TodoUpdated } from "./todo-bridge.js";
-import { bindMessageEntries, forkConversation, getEntries, hasInterruptedShellTurn, navigate, pruneLocalShellTurns, reconcileShellTurns, recordTurn, restoreLocalShellTurns, shellTurnsOnBranch, revertConversation, revertNotice, SessionTreeError, unrevertConversation, type Entries, type TreeEntry, type SessionTreeState } from "./session-tree.js";
+import { bindMessageEntries, durableShellTree, forkConversation, getEntries, hasInterruptedShellTurn, navigate, reconcileShellTurns, recordTurn, revertConversation, revertNotice, SessionTreeError, unrevertConversation, type Entries, type TreeEntry, type SessionTreeState } from "./session-tree.js";
 import { SubagentBridge, taskParts, updateTaskParts, taskCompletions } from "./subagents.js";
 import { sessionDiff, touchedFiles } from "./session-diff.js";
 import { announceSessionNotice, shellTitle, shellUserMessage } from "./session-commands.js";
@@ -414,28 +414,6 @@ export class SessionManager {
       child.model = s.model;
       const childTree = await getEntries(pi);
       child.tree.leafId = childTree.leafId;
-      const boundary = messageID === undefined ? undefined : s.tree.messageEntries[messageID];
-      child.tree.localShellTurns = shellTurnsOnBranch(s, childTree).filter((turn) =>
-        s.tree.shellDispatch?.[turn.messages[1].info.id] === false &&
-        turn.messages.every((message) => s.tree.messageEntries[message.info.id] === undefined) &&
-        turn.afterEntryId !== boundary).map((turn, index) => {
-        const messages = structuredClone(turn.messages);
-        const stem = `msg_${child.info.id}_local${index}`;
-        for (const [position, message] of messages.entries()) {
-          message.info.id = `${stem}${position === 0 ? "u" : "z"}`;
-          message.info.sessionID = child.info.id;
-          if (message.info.role === "assistant") message.info.parentID = `${stem}u`;
-          for (const [partIndex, part] of message.parts.entries()) {
-            part.id = `prt_${child.info.id}_local${index}_${position}_${partIndex}`;
-            part.sessionID = child.info.id;
-            part.messageID = message.info.id;
-            if (part.type === "tool") part.callID = `call_${child.info.id}_local${index}_${partIndex}`;
-          }
-        }
-        // The copied local attempt was never dispatched in the child.
-        (child.tree.shellDispatch ??= {})[messages[1].info.id] = false;
-        return { afterEntryId: turn.afterEntryId, messages };
-      });
       this.ensureMessages(child);
       this.wirePi(child, pi);
       this.lifecycle.touch(child);
@@ -487,9 +465,15 @@ export class SessionManager {
   private async reloadMessagesLive(s: ManagedSession, signal?: AbortSignal): Promise<OCMessageWithParts[]> {
     const sessionId = s.info.id;
     signal?.throwIfAborted();
+    const alreadyLive = s.pi !== undefined;
     if (!s.pi) await this.revive(s);
     const pi = s.pi;
     if (!pi) throw new SessionTreeError("Session cannot be resumed");
+    if (alreadyLive && hasInterruptedShellTurn(s) && !s.tree.revert && s.piPath) {
+      // Another writer can have appended after revival; reopen before binding or selecting its leaf.
+      const response = await pi.command<{ cancelled?: boolean }>({ type: "switch_session", sessionPath: s.piPath }, 60_000, signal);
+      if (!response.success || response.data?.cancelled) throw new SessionTreeError(response.error ?? "Session refresh was cancelled");
+    }
     const tree = await getEntries(pi, signal);
     signal?.throwIfAborted();
     bindMessageEntries(s, tree);
@@ -498,35 +482,20 @@ export class SessionManager {
     if (!s.tree.revert) s.tree.leafId = tree.leafId;
     else if (s.tree.leafId !== undefined && tree.leafId !== s.tree.leafId) await navigate(pi, s.tree.leafId, signal);
     signal?.throwIfAborted();
-    const previous = new Map((s.messages ?? []).map((message) => [message.info.id, message]));
-    const shellIds = new Set(s.tree.localShellTurns?.flatMap((turn) => turn.messages.map((message) => message.info.id)));
-    // Notices and shell failures without a JSONL entry remain local.
-    const local = [...previous.values()].filter((message) => s.tree.messageEntries[message.info.id] === undefined);
-    s.messages = undefined;
-    const messages = this.ensureMessages(s).map((message) => {
-      const old = previous.get(message.info.id);
-      const interrupted = old?.parts.some((part) => part.type === "tool" && part.state.status === "error" && part.state.metadata?.interrupted === true);
-      return interrupted && s.tree.messageEntries[message.info.id] !== undefined ? message : old ?? message;
-    });
-    s.messages = messages;
-    for (const message of local) {
-      if (!messages.some((item) => item.info.id === message.info.id) &&
-        (!shellIds.has(message.info.id) || s.tree.localShellTurns?.some((turn) => turn.messages.some((item) => item.info.id === message.info.id)))) {
-        this.appendMessage(sessionId, message);
-      }
-    }
-    const ids = new Set(s.messages.map((message) => message.info.id));
-    for (const message of previous.values()) {
+    const previous = s.messages ?? [];
+    const messages = this.refreshMessageCache(s);
+    const ids = new Set(messages.map((message) => message.info.id));
+    for (const message of previous) {
       if (!ids.has(message.info.id)) {
         this.emit(s.info.directory, { type: "message.removed", properties: { sessionID: sessionId, messageID: message.info.id } });
       }
     }
-    for (const message of s.messages) {
+    for (const message of messages) {
       this.emit(s.info.directory, { type: "message.updated", properties: { info: message.info } });
       for (const part of message.parts) this.emitPart(s, part);
     }
     this.update(sessionId, {});
-    return s.messages;
+    return messages;
   }
 
   statuses(): Record<string, OCSessionStatus> {
@@ -735,8 +704,6 @@ export class SessionManager {
         }
       }
       this.removeRevertNotice(s, revertNotice(s));
-      const activeTree = await getEntries(pi);
-      pruneLocalShellTurns(s, { ...activeTree, leafId: s.tree.leafId === undefined ? activeTree.leafId : s.tree.leafId });
       delete s.tree.revert;
       delete s.info.revert;
       this.persistMeta(s);
@@ -869,10 +836,8 @@ export class SessionManager {
     const restored = s.restored;
     if (restored === undefined) throw new Error(`session is not restorable: ${s.info.id}`);
     if (!existsSync(restored.piPath)) throw new Error(`pi session file is gone: ${restored.piPath}`);
-    if (hasInterruptedShellTurn(s)) {
-      s.messages = undefined;
-      this.ensureMessages(s);
-    } else if (s.recoverShellTurns) this.ensureMessages(s);
+    if (hasInterruptedShellTurn(s)) this.refreshMessageCache(s);
+    else if (s.recoverShellTurns) this.ensureMessages(s);
     await this.lifecycle.makeRoom();
     const pi = new PiRpcClient({ cwd: s.info.directory, args: ["--session", restored.piPath], clock: this.lifecycle.clock });
     const state = await pi.command<PiState>({ type: "get_state" }).catch(async (error: unknown) => {
@@ -919,6 +884,22 @@ export class SessionManager {
         this.persistMeta(s);
       }
     }
+    return s.messages;
+  }
+
+  private refreshMessageCache(s: ManagedSession): OCMessageWithParts[] {
+    const previous = s.messages ?? [];
+    s.messages = undefined;
+    const parsed = new Map(this.ensureMessages(s).map((message) => [message.info.id, message]));
+    s.messages = previous.flatMap((message) => {
+      const restored = parsed.get(message.info.id);
+      parsed.delete(message.info.id);
+      if (!restored) return s.tree.messageEntries[message.info.id] === undefined ? [message] : [];
+      const interrupted = message.parts.some((part) => part.type === "tool" && part.state.status === "error" &&
+        part.state.metadata?.interrupted === true);
+      return [interrupted && s.tree.messageEntries[message.info.id] !== undefined ? restored : message];
+    });
+    s.messages.push(...parsed.values());
     return s.messages;
   }
 
@@ -987,7 +968,7 @@ export class SessionManager {
       },
     };
     const managed: ManagedSession = {
-      tree: reg?.tree ?? { messageEntries: {} },
+      tree: durableShellTree(reg?.tree ?? { messageEntries: {} }),
       ...(reg?.tree?.localShellTurns?.length ? { recoverShellTurns: true } : {}),
       info,
       pi: undefined,
@@ -1035,7 +1016,7 @@ export class SessionManager {
     if (piPath === undefined || piSessionId === undefined) return;
     this.store.set(s.info.id, {
       ...(this.createdSessions.has(piSessionId) ? { connectorOwned: true } : {}),
-      tree: s.tree,
+      tree: durableShellTree(s.tree),
       piSessionId,
       piPath,
       directory: s.info.directory,
@@ -1829,5 +1810,9 @@ function parsePiSessionText(s: ManagedSession, agentName: string, raw: string): 
       }
     }
   }
-  return restoreLocalShellTurns(s, out, nativeTree);
+  for (const turn of s.tree.localShellTurns ?? []) {
+    out.push(...turn.messages);
+    for (const message of turn.messages) (s.localMessageIds ??= new Set()).add(message.info.id);
+  }
+  return out;
 }

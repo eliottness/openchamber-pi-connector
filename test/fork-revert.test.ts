@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, watch, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -133,28 +133,41 @@ test("a cold restore keeps a running shell identity without inventing a native r
   }
 });
 
-test("local shell custom anchors restore after their nearest rendered native ancestor", async (t) => {
+test("never dispatched shell attempts stay live but are absent from the registry and restart", async (t) => {
   const { manager, dir, state } = setup(t);
   const { s, id } = await turns(manager, dir);
-  const cancelled = await cancelQueuedShell(t, manager, s, "echo custom-anchor");
-  assert.ok(s.piPath);
-  const parentId = s.tree.leafId;
+  const cancelled = await cancelQueuedShell(t, manager, s, "echo ephemeral");
+  assert.ok(manager.messages(id)?.some((message) => message.info.id === cancelled.info.id));
+  assert.equal(manager.messages(id)?.length, 8);
+  const disk = new SessionStore(state).get(id);
+  assert.ok(disk?.tree);
+  assert.equal(disk.tree.shellDispatch?.[cancelled.info.id], undefined);
+  assert.equal(disk.tree.localShellTurns?.some((turn) => turn.messages.some((message) =>
+    message.info.id === cancelled.info.id || message.info.id === cancelled.info.parentID)) ?? false, false);
   await manager.disposeAll();
-  const store = new SessionStore(state);
-  const reg = store.get(id);
-  const local = reg?.tree?.localShellTurns?.[0];
-  assert.ok(reg?.tree && local);
-  const custom = { type: "custom", id: "non_rendered_stop_state", parentId, customType: "senpi.hooks.stop-state", timestamp: Date.now() };
-  writeFileSync(s.piPath, readFileSync(s.piPath, "utf8") + JSON.stringify(custom) + "\n");
-  local.afterEntryId = custom.id;
-  reg.tree.leafId = custom.id;
-  store.set(id, reg);
   const cold = new SessionManager(() => {}, new SessionStore(state), dir);
   t.after(() => cold.disposeAll());
   const history = cold.messages(id);
   assert.equal(history?.[0]?.info.id, "msg_live_1");
-  assert.deepEqual(history?.slice(-2).map((message) => message.info.id), [cancelled.info.parentID, cancelled.info.id]);
-  assert.equal(history?.length, 8);
+  assert.equal(history?.length, 6);
+  assert.equal(history?.some((message) => message.info.id === cancelled.info.id ||
+    message.info.id === cancelled.info.parentID), false);
+});
+
+test("old registry local attempts are not restored under the ephemeral contract", async (t) => {
+  const { manager, dir, state } = setup(t);
+  const { s, id } = await turns(manager, dir);
+  const cancelled = await cancelQueuedShell(t, manager, s, "echo legacy-local");
+  const saved = new SessionStore(state).get(id);
+  assert.ok(saved?.tree);
+  saved.tree.localShellTurns = [{ afterEntryId: s.tree.leafId ?? null, messages: [shellUserMessage(cancelled), cancelled] }];
+  (saved.tree.shellDispatch ??= {})[cancelled.info.id] = false;
+  const legacy = new SessionStore(join(dir, "legacy-state"));
+  legacy.set(id, saved);
+  const cold = new SessionManager(() => {}, legacy, dir);
+  t.after(() => cold.disposeAll());
+  assert.equal(cold.messages(id)?.length, 6);
+  assert.equal(cold.messages(id)?.some((message) => message.info.id === cancelled.info.id), false);
 });
 
 test("shutdown marks an active shell interrupted rather than rejected", { timeout: 30_000 }, async (t) => {
@@ -179,19 +192,19 @@ test("shutdown marks an active shell interrupted rather than rejected", { timeou
     (restored.parts[0].state.status === "error" && (restored.parts[0].state.metadata?.interrupted === true || restored.parts[0].state.metadata?.cancelled === true)));
 });
 
-test("a replacement prompt prunes abandoned local shell identities through reload and restart", async (t) => {
+test("a replacement prompt cannot resurrect ephemeral shell attempts through reload and restart", async (t) => {
   const { manager, dir, state } = setup(t);
   const { s, id } = await turns(manager, dir);
   const cancelled = await cancelQueuedShell(t, manager, s, "echo discarded");
   await manager.revert(id, "msg_live_2");
-  assert.equal(s.tree.localShellTurns?.length, 1, "revert alone retains redo");
+  assert.ok(manager.messages(id)?.some((message) => message.info.id === cancelled.info.id), "revert alone retains the live cache");
   await manager.prompt(id, "replacement", undefined, false, "msg_replacement");
   const retained = () => manager.messages(id)?.some((message) => message.info.id === cancelled.info.id);
   assert.equal(retained(), false);
   await manager.reloadMessages(id);
   assert.equal(retained(), false, "reload must not resurrect the abandoned pair");
   assert.equal(new SessionStore(state).get(id)?.tree?.localShellTurns?.length ?? 0, 0);
-  assert.equal(s.tree.shellDispatch?.[cancelled.info.id], undefined);
+  assert.equal(new SessionStore(state).get(id)?.tree?.shellDispatch?.[cancelled.info.id], undefined);
   await manager.disposeAll();
   const cold = new SessionManager(() => {}, new SessionStore(state), dir);
   t.after(() => cold.disposeAll());
@@ -199,7 +212,7 @@ test("a replacement prompt prunes abandoned local shell identities through reloa
   assert.equal(cold.messages(id)?.[0]?.info.id, "msg_live_1");
 });
 
-test("forks copy only local shell turns on their native path with child identities", async (t) => {
+test("forks never copy ephemeral shell attempts even before a normal user boundary", async (t) => {
   const { manager, dir, state } = setup(t);
   const info = await manager.create(dir);
   const s = manager.get(info.id);
@@ -208,20 +221,20 @@ test("forks copy only local shell turns on their native path with child identiti
   const first = await cancelQueuedShell(t, manager, s, "echo local-one");
   await manager.prompt(info.id, "two", undefined, false, "msg_two");
   await cancelQueuedShell(t, manager, s, "echo local-two");
-  const child = await manager.fork(info.id, "msg_two");
-  const local = manager.messages(child.id)?.filter((message) => message.parts.some((part) => part.type === "tool" && part.tool === "bash"));
-  assert.equal(local?.length, 1);
-  const copied = local?.[0];
-  assert.ok(copied?.parts[0]?.type === "tool");
-  assert.equal(copied.parts[0].state.input.command, "echo local-one");
-  assert.notEqual(copied.info.id, first.info.id);
-  assert.ok(copied.parts.every((part) => part.sessionID === child.id && part.messageID === copied.info.id));
-  assert.equal(manager.get(child.id)?.tree.shellDispatch?.[copied.info.id], false);
+  assert.ok(manager.messages(info.id)?.some((message) => message.info.id === first.info.id));
+  const children = [];
+  for (const boundary of ["msg_two", undefined]) {
+    const child = await manager.fork(info.id, boundary);
+    children.push(child.id);
+    assert.equal(manager.messages(child.id)?.filter((message) =>
+      message.parts.some((part) => part.type === "tool" && part.tool === "bash")).length, 0);
+  }
   await manager.disposeAll();
   const cold = new SessionManager(() => {}, new SessionStore(state), dir);
   t.after(() => cold.disposeAll());
-  assert.ok(cold.messages(child.id)?.some((message) => message.info.id === copied.info.id));
-  assert.equal(cold.messages(info.id)?.filter((message) => message.parts.some((part) => part.type === "tool" && part.tool === "bash")).length, 2);
+  for (const childID of children) assert.equal(cold.messages(childID)?.filter((message) =>
+    message.parts.some((part) => part.type === "tool" && part.tool === "bash")).length, 0);
+  assert.equal(cold.messages(info.id)?.filter((message) => message.parts.some((part) => part.type === "tool" && part.tool === "bash")).length, 0);
 });
 
 for (const boundary of ["complete", "assistant", "user"] as const) {
@@ -279,10 +292,51 @@ test("a fork at a native shell excludes local attempts after that boundary", { t
   const cold = new SessionManager(() => {}, new SessionStore(state), dir);
   t.after(() => cold.disposeAll());
   assert.deepEqual(commands(cold), ["echo included"]);
-  assert.ok(cold.messages(info.id)?.some((message) => message.info.id === queued.info.id));
+  assert.equal(cold.messages(info.id)?.some((message) => message.info.id === queued.info.id), false);
 });
 
-for (const action of ["refresh", "fork"] as const) {
+test("an older cached ancestor cannot carry a later queued attempt across either shell fork cutoff", { timeout: 30_000 }, async (t) => {
+  const { manager, dir, state } = setup(t);
+  const info = await manager.create(dir);
+  await manager.prompt(info.id, "before", undefined, false, "msg_before");
+  const session = manager.get(info.id);
+  assert.ok(session?.pi);
+  const ancestor = session.tree.leafId;
+  execFileSync("mkfifo", [join(dir, "gate"), join(dir, "exit-gate")]);
+  const ready = Promise.withResolvers<void>();
+  const finished = Promise.withResolvers<void>();
+  const watcher = watch(dir, (_event, name) => { if (name === "ready") ready.resolve(); });
+  t.after(() => watcher.close());
+  session.pi.onEvent((event) => { if (event.type === "fake_bash_finished") finished.resolve(); });
+  const command = 'trap "IFS= read -r x < exit-gate; exit 0" TERM; : > ready; IFS= read -r x < gate; echo earlier';
+  const pending = runShellCommand({ sessions: manager, session, command, emit: () => {} });
+  await ready.promise;
+  await manager.abort(info.id);
+  const earlier = await pending;
+  assert.equal(earlier.kind, "completed");
+  assert.equal(session.tree.leafId, ancestor);
+  execFileSync("/bin/sh", ["-c", "printf 'release\\n' > exit-gate"], { cwd: dir });
+  await finished.promise;
+  assert.equal(session.tree.leafId, ancestor, "no preliminary source refresh before admitting the later attempt");
+  const queued = await cancelQueuedShell(t, manager, session, "echo later-local");
+  const children = [];
+  for (const [boundary, expected] of [[earlier.message.info.id, [command]], [earlier.message.info.parentID, []]] as const) {
+    const child = await manager.fork(info.id, boundary);
+    children.push({ id: child.id, expected });
+    const commands = manager.messages(child.id)?.flatMap((message) => message.parts.flatMap((part) =>
+      part.type === "tool" && part.tool === "bash" ? [part.state.input.command] : []));
+    assert.deepEqual(commands, expected);
+  }
+  assert.ok(manager.messages(info.id)?.some((message) => message.info.id === queued.info.id));
+  await manager.disposeAll();
+  const cold = new SessionManager(() => {}, new SessionStore(state), dir);
+  t.after(() => cold.disposeAll());
+  for (const child of children) assert.deepEqual(cold.messages(child.id)?.flatMap((message) =>
+    message.parts.flatMap((part) => part.type === "tool" && part.tool === "bash" ? [part.state.input.command] : [])), child.expected);
+  assert.equal(cold.messages(info.id)?.some((message) => message.info.id === queued.info.id), false);
+});
+
+for (const action of ["refresh", "fork", "prewarmed", "notice"] as const) {
   test(`an interrupted identity reconciles a late native result on warm ${action}`, { timeout: 30_000 }, async (t) => {
     const { manager, dir, state } = setup(t);
     const info = await manager.create(dir);
@@ -305,17 +359,39 @@ for (const action of ["refresh", "fork"] as const) {
     const initial = cold.messages(info.id)?.find((message) => message.info.id === live.info.id);
     assert.ok(initial?.parts[0]?.type === "tool" && initial.parts[0].state.status === "error");
     assert.equal(initial.parts[0].state.metadata?.interrupted, true);
+    if (action === "prewarmed") {
+      await cold.reloadMessages(info.id);
+      assert.ok(cold.get(info.id)?.pi, "RPC must already be revived while the original writer is blocked");
+    }
+    let noticeID: string | undefined;
+    if (action === "notice") {
+      const recovered = cold.get(info.id);
+      assert.ok(recovered);
+      announceSessionNotice({ sessions: cold, session: recovered, emit: () => {} }, "Local recovery notice");
+      noticeID = cold.messages(info.id)?.at(-1)?.info.id;
+      assert.ok(noticeID);
+    }
     execFileSync("/bin/sh", ["-c", "printf 'release\\n' > late-gate"], { cwd: dir });
     const completed = await pending;
     assert.equal(completed.kind, "completed");
-    if (action === "refresh") await cold.reloadMessages(info.id);
-    else await cold.fork(info.id, live.info.id);
+    if (action === "fork") await cold.fork(info.id, live.info.id);
+    else await cold.reloadMessages(info.id);
     const restored = cold.messages(info.id)?.find((message) => message.info.id === live.info.id);
     assert.ok(restored?.parts[0]?.type === "tool" && restored.parts[0].state.status === "completed");
     assert.equal(restored.parts[0].state.output, "late-native\n");
     assert.equal(restored.info.role === "assistant" && restored.info.parentID, live.info.parentID);
     assert.equal(cold.messages(info.id)?.filter((message) => message.parts.some((part) =>
       part.type === "tool" && part.tool === "bash")).length, 1);
+    if (noticeID) assert.ok(cold.messages(info.id)?.some((message) => message.info.id === noticeID));
+    if (action === "prewarmed") {
+      await cold.fork(info.id, live.info.id);
+      await cold.disposeAll();
+      const nextCold = new SessionManager(() => {}, new SessionStore(snapshot.stateDir), dir);
+      t.after(() => nextCold.disposeAll());
+      const next = nextCold.messages(info.id)?.find((message) => message.info.id === live.info.id);
+      assert.ok(next?.parts[0]?.type === "tool" && next.parts[0].state.status === "completed");
+      assert.equal(next.parts[0].state.output, "late-native\n");
+    }
   });
 }
 
@@ -344,9 +420,8 @@ test("a never-dispatched cancelled shell cannot claim an identical successful ru
   const restored = new SessionManager(() => {}, new SessionStore(state), dir);
   t.after(() => restored.disposeAll());
   const restarted = restored.messages(info.id)?.filter((message) => message.parts.some((part) => part.type === "tool" && part.tool === "bash"));
-  assert.deepEqual(restarted?.map((message) => message.info.id), [cancelled.info.id, completed.message.info.id]);
-  assert.equal(restarted?.[0]?.parts[0]?.type === "tool" && restarted[0].parts[0].state.status, "error");
-  assert.equal(restarted?.[1]?.parts[0]?.type === "tool" && restarted[1].parts[0].state.status, "completed");
+  assert.deepEqual(restarted?.map((message) => message.info.id), [completed.message.info.id]);
+  assert.equal(restarted?.[0]?.parts[0]?.type === "tool" && restarted[0].parts[0].state.status, "completed");
   await restored.revert(info.id, completed.message.info.parentID);
   await restored.unrevert(info.id);
   await restored.fork(info.id, completed.message.info.id);
@@ -407,8 +482,8 @@ test("identical shell commands retain mixed cancellation outcomes and distinct t
   const restored = new SessionManager(() => {}, new SessionStore(state), dir);
   t.after(() => restored.disposeAll());
   const restarted = restored.messages(info.id)?.filter((message) => message.parts.some((part) => part.type === "tool" && part.tool === "bash"));
-  assert.deepEqual(restarted?.map((message) => message.info.id), identities);
-  assert.deepEqual(restarted?.map((message) => message.parts[0]?.type === "tool" && message.parts[0].state.status), ["error", "error", "completed", "completed"]);
+  assert.deepEqual(restarted?.map((message) => message.info.id), dispatched.map((message) => message.info.id));
+  assert.deepEqual(restarted?.map((message) => message.parts[0]?.type === "tool" && message.parts[0].state.status), ["error", "completed", "completed"]);
   for (const message of dispatched) {
     await restored.revert(info.id, message.info.parentID);
     await restored.unrevert(info.id);

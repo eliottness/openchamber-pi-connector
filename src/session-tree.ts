@@ -7,7 +7,7 @@ export interface SessionTreeState {
   messageEntries: Record<string, string>;
   /** Actual transport dispatch, not inferred from a card's terminal state. */
   shellDispatch?: Record<string, boolean>;
-  /** Unresolved identities are saved before dispatch and removed after binding. */
+  /** Dispatched unresolved identities; afterEntryId guards native binding, not display order. */
   localShellTurns?: Array<{ afterEntryId: string | null; messages: [OCMessageWithParts, OCMessageWithParts] }>;
   leafId?: string | null;
   revert?: { messageID: string; previousLeafId: string | null; targetId: string | null };
@@ -42,21 +42,12 @@ export function hasInterruptedShellTurn(s: ManagedSession): boolean {
       part.state.metadata?.interrupted === true)) ?? false;
 }
 
-export function shellTurnsOnBranch(s: ManagedSession, tree: Entries) {
-  const ids = new Set(branchEntries(tree).map((entry) => entry.id));
-  return (s.tree.localShellTurns ?? []).filter((turn) => turn.afterEntryId === null || ids.has(turn.afterEntryId));
-}
-
-export function pruneLocalShellTurns(s: ManagedSession, tree: Entries): void {
-  const retained = new Set(shellTurnsOnBranch(s, tree));
-  for (const turn of s.tree.localShellTurns ?? []) {
-    if (retained.has(turn)) continue;
-    for (const message of turn.messages) {
-      s.localMessageIds?.delete(message.info.id);
-      if (s.tree.shellDispatch) delete s.tree.shellDispatch[message.info.id];
-    }
-  }
-  s.tree.localShellTurns = [...retained].filter((turn) => s.tree.messageEntries[turn.messages[1].info.id] === undefined);
+export function durableShellTree(tree: SessionTreeState): SessionTreeState {
+  return {
+    ...tree,
+    shellDispatch: Object.fromEntries(Object.entries(tree.shellDispatch ?? {}).filter(([, dispatched]) => dispatched)),
+    localShellTurns: (tree.localShellTurns ?? []).filter((turn) => tree.shellDispatch?.[turn.messages[1].info.id] === true),
+  };
 }
 
 export function reconcileShellTurns(s: ManagedSession, tree: Entries): void {
@@ -67,7 +58,7 @@ export function reconcileShellTurns(s: ManagedSession, tree: Entries): void {
   }
   bindMessageEntries(s, tree);
   s.messages = previous;
-  pruneLocalShellTurns(s, tree);
+  s.tree.localShellTurns = (s.tree.localShellTurns ?? []).filter((turn) => s.tree.messageEntries[turn.messages[1].info.id] === undefined);
   if (!s.recoverShellTurns) return;
   for (const turn of s.tree.localShellTurns ?? []) {
     const assistant = turn.messages[1];
@@ -81,20 +72,6 @@ export function reconcileShellTurns(s: ManagedSession, tree: Entries): void {
     };
     assistant.info.time.completed = completed;
   }
-}
-
-export function restoreLocalShellTurns(s: ManagedSession, messages: OCMessageWithParts[], tree: Entries): OCMessageWithParts[] {
-  const byId = new Map(branchEntries(tree).map((entry) => [entry.id, entry]));
-  for (const turn of [...(s.tree.localShellTurns ?? [])].reverse()) {
-    let anchor = -1;
-    for (let id = turn.afterEntryId; id !== null; id = byId.get(id)?.parentId ?? null) {
-      anchor = messages.map((message) => s.tree.messageEntries[message.info.id]).lastIndexOf(id);
-      if (anchor >= 0) break;
-    }
-    messages.splice(anchor + 1, 0, ...turn.messages);
-    for (const message of turn.messages) (s.localMessageIds ??= new Set()).add(message.info.id);
-  }
-  return messages;
 }
 
 export async function getEntries(pi: PiRpcClient, signal?: AbortSignal): Promise<Entries> {

@@ -284,16 +284,16 @@ export async function runShellCommand(context: ShellCommandContext): Promise<She
   };
   sessions.appendMessage(session.info.id, user);
   sessions.appendMessage(session.info.id, message);
-  (session.tree.localShellTurns ??= []).push({ afterEntryId, messages: [user, message] });
   setShellStatus(context, "busy");
   shellEvent(context, { type: "message.updated", properties: { info: user.info } });
   shellEvent(context, { type: "message.part.updated", properties: { part: user.parts[0] } });
   emitShellMessage(context, message);
   try {
-    // Admission must survive even if shutdown precedes the queued RPC.
     sessions.update(session.info.id, {});
     const response = await sessions.sessionRpc<unknown>(session.info.id, { type: "bash", command }, controller.signal, () => {
       dispatch[message.info.id] = true;
+      // Only actual dispatch admissions are durable; queued attempts stay in the live cache.
+      (session.tree.localShellTurns ??= []).push({ afterEntryId, messages: [user, message] });
       // A native result can land beyond the last synchronized leaf.
       if (!session.tree.revert) delete session.tree.leafId;
       sessions.update(session.info.id, {});

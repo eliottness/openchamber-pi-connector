@@ -71,7 +71,9 @@ export function bindMessageEntries(s: ManagedSession, tree: Entries): void {
       cursor = index + 1;
     }
   }
-  s.tree.leafId = tree.leafId;
+  // Syncs/agent events preserve an active revert's navigation pin. Only
+  // revert/unrevert select it explicitly; prompt clears the pin before branching.
+  if (!s.tree.revert) s.tree.leafId = tree.leafId;
 }
 
 export function entryForMessage(s: ManagedSession, tree: Entries, messageID: string): TreeEntry {

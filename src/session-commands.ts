@@ -132,6 +132,7 @@ export async function runSlashCommand(
   input: SlashCommandInput,
 ): Promise<OCMessageWithParts | undefined> {
   await sessions.prompt(sessionId, slashCommandPrompt(input));
+  await sessions.reloadMessages(sessionId);
   const messages = sessions.messages(sessionId) ?? [];
   return [...messages].reverse().find((message) => message.info.role === "assistant") ?? messages[messages.length - 1];
 }
@@ -234,8 +235,6 @@ export function failShellMessage(message: ShellMessage, command: string, error: 
 export async function compactSession(sessions: SessionManager, sessionId: string): Promise<CompactResult> {
   const response = await sessions.sessionRpc(sessionId, { type: "compact" });
   if (!response.success) return { kind: "error", message: response.error ?? "OmO compact failed" };
-  sessions.reloadMessages(sessionId);
-  sessions.update(sessionId, {});
   return { kind: "compacted" };
 }
 

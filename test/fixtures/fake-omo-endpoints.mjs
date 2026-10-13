@@ -83,6 +83,11 @@ input.on("line", (line) => {
     case "prompt": {
       const text = command.message;
       hasPrompt = true;
+      if (text === "/fixture") {
+        recordMessage("assistant", "Slash command output without agent events");
+        reply(command, true, {});
+        return;
+      }
       recordMessage("user", text);
       const assistant = recordMessage("assistant", `reply: ${text}`);
       send({ type: "agent_start" });
@@ -110,6 +115,7 @@ input.on("line", (line) => {
         return;
       }
       const match = command.command.match(/^exit\s+(\d+)$/);
+      recordMessage("assistant", `Persisted shell output: ${command.command}`);
       reply(command, true, {
         output: "SHELL_OUTPUT",
         exitCode: match ? Number(match[1]) : 0,

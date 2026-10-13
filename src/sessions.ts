@@ -423,11 +423,37 @@ export class SessionManager {
     if (notice) this.emit(s.info.directory, { type: "message.removed", properties: { sessionID: s.info.id, messageID: notice.info.id } });
   }
 
-  reloadMessages(sessionId: string): OCMessageWithParts[] | undefined {
+  async reloadMessages(sessionId: string): Promise<OCMessageWithParts[] | undefined> {
     const s = this.get(sessionId);
     if (!s) return undefined;
-    s.messages = undefined;
-    return this.ensureMessages(s);
+    return this.lifecycle.use(s, async () => {
+      if (!s.pi) await this.revive(s);
+      const pi = s.pi;
+      if (!pi) throw new SessionTreeError("Session cannot be resumed");
+      const tree = await getEntries(pi);
+      // Compact/bash and extension slash commands can append without agent_end.
+      // Follow their leaf unless reverted; keep both the history and RPC cursor pinned.
+      if (!s.tree.revert) s.tree.leafId = tree.leafId;
+      else if (s.tree.leafId !== undefined && tree.leafId !== s.tree.leafId) await navigate(pi, s.tree.leafId);
+      const previous = new Map((s.messages ?? []).map((message) => [message.info.id, message]));
+      // Adapter-only shell/error cards have no JSONL entry; retain them on reload.
+      const local = [...previous.values()].filter((message) => s.tree.messageEntries[message.info.id] === undefined);
+      s.messages = undefined;
+      const messages = this.ensureMessages(s).map((message) => previous.get(message.info.id) ?? message);
+      s.messages = [...messages, ...local];
+      const ids = new Set(s.messages.map((message) => message.info.id));
+      for (const message of previous.values()) {
+        if (!ids.has(message.info.id)) {
+          this.emit(s.info.directory, { type: "message.removed", properties: { sessionID: sessionId, messageID: message.info.id } });
+        }
+      }
+      for (const message of s.messages) {
+        this.emit(s.info.directory, { type: "message.updated", properties: { info: message.info } });
+        for (const part of message.parts) this.emitPart(s, part);
+      }
+      this.update(sessionId, {});
+      return s.messages;
+    });
   }
 
   statuses(): Record<string, OCSessionStatus> {
@@ -518,7 +544,9 @@ export class SessionManager {
       const pi = s.pi;
       if (pi === undefined) throw new Error(`session cannot be resumed: ${sessionId}`);
       this.lifecycle.touch(s);
-      return pi.command<T>(command);
+      const response = await pi.command<T>(command);
+      if (response.success && (command.type === "compact" || command.type === "bash")) await this.reloadMessages(sessionId);
+      return response;
     });
   }
 

@@ -187,6 +187,30 @@ test("shell route emits a bash card with output and exit code", { timeout: 30_00
   await v2CompletedPart;
 });
 
+test("slash command refreshes entries persisted without agent events", { timeout: 30_000 }, async (t) => {
+  const { url } = await startServer(t);
+  const sessionId = await createSession(url);
+  await sendPrompt(url, sessionId, "before slash command");
+  const stream = startEvents(url);
+  t.after(stream.close);
+  await stream.ready;
+  const output = stream.waitFor(
+    "message.part.updated",
+    (event) => JSON.stringify(event).includes("Slash command output without agent events"),
+  );
+  const response = await fetch(`${url}/session/${sessionId}/command`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ command: "fixture", arguments: "" }),
+  });
+  assert.equal(response.status, 200);
+  assert.match(JSON.stringify(await response.json()), /Slash command output without agent events/);
+  const history = await fetch(`${url}/session/${sessionId}/message`);
+  assert.equal(history.status, 200);
+  assert.match(JSON.stringify(await history.json()), /Slash command output without agent events/);
+  await output;
+});
+
 test("empty shell commands return a client error without creating a card", { timeout: 30_000 }, async (t) => {
   const { url } = await startServer(t);
   const sessionId = await createSession(url);
@@ -196,6 +220,37 @@ test("empty shell commands return a client error without creating a card", { tim
     body: JSON.stringify({ command: "" }),
   });
   assert.equal(response.status, 400);
+});
+
+test("shell refreshes persisted entries appended without agent events and retains its bash card", { timeout: 30_000 }, async (t) => {
+  const { url } = await startServer(t);
+  const sessionId = await createSession(url);
+  await sendPrompt(url, sessionId, "before shell");
+  const stream = startEvents(url);
+  t.after(stream.close);
+  await stream.ready;
+  const persistedPart = stream.waitFor(
+    "message.part.updated",
+    (event) => JSON.stringify(event).includes("Persisted shell output: exit 7"),
+  );
+  const updated = stream.waitFor(
+    "session.updated",
+    (event) => JSON.stringify(event).includes(`"id":"${sessionId}"`),
+  );
+  const response = await fetch(`${url}/session/${sessionId}/shell`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ command: "exit 7" }),
+  });
+  assert.equal(response.status, 200);
+  const history = await fetch(`${url}/session/${sessionId}/message`);
+  assert.equal(history.status, 200);
+  const messages: unknown = await history.json();
+  assert.match(JSON.stringify(messages), /Persisted shell output: exit 7/);
+  assert.match(JSON.stringify(messages), /"tool":"bash"/);
+  assert.match(JSON.stringify(messages), /"output":"SHELL_OUTPUT"/);
+  assert.match(JSON.stringify(messages), /"exitCode":7/);
+  await Promise.all([persistedPart, updated]);
 });
 
 test("compact returns the small-session error and reloads compacted history", { timeout: 30_000 }, async (t) => {

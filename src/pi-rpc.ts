@@ -157,7 +157,7 @@ export class PiRpcClient extends EventEmitter {
     const id = msg.id as string | undefined;
     if (!id || !method) return;
     const blocking = new Set(["select", "confirm", "input", "editor"]);
-    if (!blocking.has(method)) return;
+    if (!blocking.has(method) && method !== "notify") return;
     this.emit("extension_ui_request", msg);
   }
 
@@ -176,24 +176,35 @@ export class PiRpcClient extends EventEmitter {
   }
 
   /** Send a command and wait for its correlated response. */
-  command<T = unknown>(cmd: Omit<PiRpcCommand, "id">, timeoutMs = 60_000): Promise<PiRpcResponse & { data?: T }> {
+  command<T = unknown>(cmd: Omit<PiRpcCommand, "id">, timeoutMs = 60_000, signal?: AbortSignal): Promise<PiRpcResponse & { data?: T }> {
     if (this.closed) return Promise.reject(new Error("pi process is not running"));
+    if (signal?.aborted) return Promise.reject(signal.reason);
     const id = randomUUID();
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const cleanup = (): void => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
         this.pending.delete(id);
+      };
+      const onAbort = (): void => {
+        cleanup();
+        reject(signal?.reason);
+      };
+      const timer = setTimeout(() => {
+        cleanup();
         reject(new Error(`pi command "${cmd.type}" timed out after ${timeoutMs}ms`));
       }, timeoutMs);
       this.pending.set(id, {
         resolve: (r) => {
-          clearTimeout(timer);
+          cleanup();
           resolve(r as PiRpcResponse & { data?: T });
         },
         reject: (e) => {
-          clearTimeout(timer);
+          cleanup();
           reject(e);
         },
       });
+      signal?.addEventListener("abort", onAbort, { once: true });
       this.write({ ...cmd, id });
     });
   }

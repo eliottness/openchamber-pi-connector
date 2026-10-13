@@ -54,6 +54,7 @@ function startEvents(url: string) {
   return {
     ready,
     close: () => controller.abort(),
+    mark(): number { return history.length; },
     waitFor(type: string, predicate: (event: TestEvent) => boolean): Promise<TestEvent> {
       const existing = history.find((event) => event.type === type && predicate(event));
       if (existing !== undefined) return Promise.resolve(existing);
@@ -62,6 +63,24 @@ function startEvents(url: string) {
         const onTimeout = (): void => {
           events.off(type, onEvent);
           rejectEvent(new Error(`timed out waiting for ${type}`));
+        };
+        const onEvent = (event: TestEvent): void => {
+          if (!predicate(event)) return;
+          events.off(type, onEvent);
+          resolveEvent(event);
+        };
+        timeout.addEventListener("abort", onTimeout, { once: true });
+        events.on(type, onEvent);
+      });
+    },
+    waitForAfter(after: number, type: string, predicate: (event: TestEvent) => boolean): Promise<TestEvent> {
+      const existing = history.slice(after).find((event) => event.type === type && predicate(event));
+      if (existing !== undefined) return Promise.resolve(existing);
+      return new Promise((resolveEvent, rejectEvent) => {
+        const timeout = AbortSignal.timeout(10_000);
+        const onTimeout = (): void => {
+          events.off(type, onEvent);
+          rejectEvent(new Error("timed out waiting for a new bridge event"));
         };
         const onEvent = (event: TestEvent): void => {
           if (!predicate(event)) return;
@@ -414,9 +433,11 @@ test("compact returns the small-session error and reloads compacted history", { 
 
   const history = await fetch(`${url}/session/${sessionId}/message`);
   assert.equal(history.status, 200);
-  assert.match(JSON.stringify(await history.json()), /Compacted summary/);
+  assert.match(JSON.stringify(await history.json()), /Compacted summary 1/);
 
-  const updatedV2 = stream.waitFor(
+  const v2Marker = stream.mark();
+  const updatedV2 = stream.waitForAfter(
+    v2Marker,
     "session.updated",
     (event) => JSON.stringify(event).includes(`"id":"${sessionId}"`),
   );
@@ -431,7 +452,7 @@ test("compact returns the small-session error and reloads compacted history", { 
 
   const v2History = await fetch(`${url}/api/session/${sessionId}/message?order=asc`);
   assert.equal(v2History.status, 200);
-  assert.match(JSON.stringify(await v2History.json()), /Compacted summary/);
+  assert.match(JSON.stringify(await v2History.json()), /Compacted summary 2/);
 });
 
 test("share and unshare return the unsupported payload on both API surfaces", { timeout: 30_000 }, async (t) => {

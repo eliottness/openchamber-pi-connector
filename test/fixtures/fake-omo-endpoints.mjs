@@ -13,6 +13,7 @@ let hasPrompt = false;
 let pendingBash;
 let holdEntries = false;
 let pendingEntries;
+let compactions = 0;
 const entries = [];
 
 if (!noSession) {
@@ -118,7 +119,12 @@ input.on("line", (line) => {
         reply(command, false, undefined, "Nothing to compact (session too small)");
         return;
       }
-      recordMessage("assistant", "Compacted summary");
+      compactions++;
+      if (process.env.FAKE_OMO_BROKEN_V2_COMPACT === "1" && compactions === 2) {
+        reply(command, true, true);
+        return;
+      }
+      recordMessage("assistant", `Compacted summary ${compactions}`);
       reply(command, true, true);
       return;
     case "bash": {

@@ -29,7 +29,10 @@ process.stdin.on("data", (chunk) => {
         options: question ? [] : ["Allow once", "Allow always", "Deny", "Deny with feedback"],
       });
     }
-    if (command.type === "abort") send({ type: "agent_end" });
+    if (command.type === "abort") {
+      send({ type: "agent_end" });
+      send({ type: "agent_idle" });
+    }
   }
 });
 process.stdin.on("end", () => process.exit(0));

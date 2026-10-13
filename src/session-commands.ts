@@ -273,7 +273,9 @@ export async function runShellCommand(context: ShellCommandContext): Promise<She
   dispatch[message.info.id] = false;
   const afterEntryId = session.tree.leafId ?? null;
   const controller = new AbortController();
-  session.cancelShell = () => {
+  let interrupted = false;
+  session.cancelShell = (byRestart = false) => {
+    interrupted = byRestart;
     delete session.cancelShell;
     // Agent abort does not stop user bash. Dispatch the dedicated RPC first,
     // then release our waiter; a correlated late response is discarded.
@@ -282,13 +284,19 @@ export async function runShellCommand(context: ShellCommandContext): Promise<She
   };
   sessions.appendMessage(session.info.id, user);
   sessions.appendMessage(session.info.id, message);
+  (session.tree.localShellTurns ??= []).push({ afterEntryId, messages: [user, message] });
   setShellStatus(context, "busy");
   shellEvent(context, { type: "message.updated", properties: { info: user.info } });
   shellEvent(context, { type: "message.part.updated", properties: { part: user.parts[0] } });
   emitShellMessage(context, message);
   try {
+    // Admission must survive even if shutdown precedes the queued RPC.
+    sessions.update(session.info.id, {});
     const response = await sessions.sessionRpc<unknown>(session.info.id, { type: "bash", command }, controller.signal, () => {
       dispatch[message.info.id] = true;
+      // A native result can land beyond the last synchronized leaf.
+      if (!session.tree.revert) delete session.tree.leafId;
+      sessions.update(session.info.id, {});
     });
     if (controller.signal.aborted) throw controller.signal.reason;
     if (!response.success) {
@@ -307,7 +315,8 @@ export async function runShellCommand(context: ShellCommandContext): Promise<She
     return { kind: "completed", message };
   } catch (error) {
     if (controller.signal.aborted) {
-      failShellMessage(message, command, "Command cancelled", { cancelled: true });
+      failShellMessage(message, command, interrupted ? "Interrupted by restart" : "Command cancelled",
+        interrupted ? { interrupted: true } : { cancelled: true });
       emitShellMessage(context, message);
       return { kind: "completed", message };
     }
@@ -317,9 +326,6 @@ export async function runShellCommand(context: ShellCommandContext): Promise<She
   } finally {
     delete session.cancelShell;
     setShellStatus(context, "idle");
-    if (!dispatch[message.info.id] && message.parts[0].state.status === "error") {
-      (session.tree.localShellTurns ??= []).push({ afterEntryId, messages: [user, message] });
-      sessions.update(session.info.id, {});
-    }
+    sessions.update(session.info.id, {});
   }
 }

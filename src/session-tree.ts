@@ -7,7 +7,7 @@ export interface SessionTreeState {
   messageEntries: Record<string, string>;
   /** Actual transport dispatch, not inferred from a card's terminal state. */
   shellDispatch?: Record<string, boolean>;
-  /** Adapter-only attempts have no OmO entry from which to restore their cards. */
+  /** Unresolved identities are saved before dispatch and removed after binding. */
   localShellTurns?: Array<{ afterEntryId: string | null; messages: [OCMessageWithParts, OCMessageWithParts] }>;
   leafId?: string | null;
   revert?: { messageID: string; previousLeafId: string | null; targetId: string | null };
@@ -34,10 +34,55 @@ export interface Entries {
 
 export class SessionTreeError extends Error {}
 
-export function restoreLocalShellTurns(s: ManagedSession, messages: OCMessageWithParts[]): OCMessageWithParts[] {
+export function shellTurnsOnBranch(s: ManagedSession, tree: Entries) {
+  const ids = new Set(branchEntries(tree).map((entry) => entry.id));
+  return (s.tree.localShellTurns ?? []).filter((turn) => turn.afterEntryId === null || ids.has(turn.afterEntryId));
+}
+
+export function pruneLocalShellTurns(s: ManagedSession, tree: Entries): void {
+  const retained = new Set(shellTurnsOnBranch(s, tree));
+  for (const turn of s.tree.localShellTurns ?? []) {
+    if (retained.has(turn)) continue;
+    for (const message of turn.messages) {
+      s.localMessageIds?.delete(message.info.id);
+      if (s.tree.shellDispatch) delete s.tree.shellDispatch[message.info.id];
+    }
+  }
+  s.tree.localShellTurns = [...retained].filter((turn) => s.tree.messageEntries[turn.messages[1].info.id] === undefined);
+}
+
+export function reconcileShellTurns(s: ManagedSession, tree: Entries): void {
+  const previous = s.messages;
+  s.messages ??= (s.tree.localShellTurns ?? []).flatMap((turn) => turn.messages);
+  for (const turn of s.tree.localShellTurns ?? []) {
+    for (const message of turn.messages) (s.localMessageIds ??= new Set()).add(message.info.id);
+  }
+  bindMessageEntries(s, tree);
+  s.messages = previous;
+  pruneLocalShellTurns(s, tree);
+  if (!s.recoverShellTurns) return;
+  for (const turn of s.tree.localShellTurns ?? []) {
+    const assistant = turn.messages[1];
+    const part = assistant.parts[0];
+    if (assistant.info.role !== "assistant" || part?.type !== "tool" ||
+      (part.state.status !== "running" && part.state.status !== "pending")) continue;
+    const completed = Date.now();
+    part.state = {
+      status: "error", input: part.state.input, error: "Interrupted by restart", metadata: { interrupted: true },
+      time: { start: assistant.info.time.created, end: completed },
+    };
+    assistant.info.time.completed = completed;
+  }
+}
+
+export function restoreLocalShellTurns(s: ManagedSession, messages: OCMessageWithParts[], tree: Entries): OCMessageWithParts[] {
+  const byId = new Map(branchEntries(tree).map((entry) => [entry.id, entry]));
   for (const turn of [...(s.tree.localShellTurns ?? [])].reverse()) {
-    const anchor = turn.afterEntryId === null ? -1 :
-      messages.map((message) => s.tree.messageEntries[message.info.id]).lastIndexOf(turn.afterEntryId);
+    let anchor = -1;
+    for (let id = turn.afterEntryId; id !== null; id = byId.get(id)?.parentId ?? null) {
+      anchor = messages.map((message) => s.tree.messageEntries[message.info.id]).lastIndexOf(id);
+      if (anchor >= 0) break;
+    }
     messages.splice(anchor + 1, 0, ...turn.messages);
     for (const message of turn.messages) (s.localMessageIds ??= new Set()).add(message.info.id);
   }
@@ -72,8 +117,9 @@ export function branchEntries(tree: Entries, leafId = tree.leafId): TreeEntry[] 
 
 /** Live ids belong to the UI; restored ids belong to JSONL offsets. Save both. */
 export function bindMessageEntries(s: ManagedSession, tree: Entries): void {
-  const entries = branchEntries(tree, s.tree.revert ? s.tree.revert.previousLeafId : tree.leafId)
-    .filter((entry) => entry.type === "message" && (entry.message?.role === "user" || entry.message?.role === "assistant" || entry.message?.role === "bashExecution"));
+  const branch = branchEntries(tree, s.tree.revert ? s.tree.revert.previousLeafId : tree.leafId);
+  const positions = new Map(branch.map((entry, index) => [entry.id, index]));
+  const entries = branch.filter((entry) => entry.type === "message" && (entry.message?.role === "user" || entry.message?.role === "assistant" || entry.message?.role === "bashExecution"));
   const messages = s.messages ?? [];
   let cursor = 0;
   for (const entry of entries) {
@@ -85,17 +131,22 @@ export function bindMessageEntries(s: ManagedSession, tree: Entries): void {
       continue;
     }
     if (shell) {
+      if (Object.values(s.tree.messageEntries).includes(entry.id)) continue;
       const index = messages.findIndex((message, i) => {
         if (i < cursor || message.info.role !== "assistant" ||
           s.tree.shellDispatch?.[message.info.id] !== true ||
           s.tree.messageEntries[message.info.id] !== undefined) return false;
         const parentEntry = s.tree.messageEntries[message.info.parentID];
         if (parentEntry !== undefined && parentEntry !== entry.id) return false;
+        const attempt = s.tree.localShellTurns?.find((turn) => turn.messages[1].info.id === message.info.id);
+        if (attempt?.afterEntryId !== undefined && attempt.afterEntryId !== null &&
+          (!positions.has(attempt.afterEntryId) || (positions.get(attempt.afterEntryId) ?? 0) >= (positions.get(entry.id) ?? 0))) return false;
         const part = message.parts.find((part) => part.type === "tool" && part.tool === "bash" &&
           part.state.input.command === entry.message?.command);
         if (part?.type !== "tool" || part.state.status === "pending") return false;
         const state = part.state;
-        if (state.status === "error" && (state.metadata?.cancelled !== true || entry.message?.cancelled !== true)) return false;
+        if (state.status === "error" && state.metadata?.interrupted !== true &&
+          (state.metadata?.cancelled !== true || entry.message?.cancelled !== true)) return false;
         if (state.status === "completed" && entry.message?.cancelled === true) return false;
         if (state.metadata?.cancelled !== undefined && state.metadata.cancelled !== (entry.message?.cancelled === true)) return false;
         if (entry.message?.exitCode !== undefined && state.metadata?.exitCode !== undefined &&

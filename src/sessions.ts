@@ -14,7 +14,7 @@ import { ApprovalBridge, extensionUiRequestFrom, type PendingPermission, type Pe
 import { getAgentName } from "./agent-name.js";
 import { applyProviderToolResults, finishProviderToolParts, mapTool, providerToolParts, resultMetadata, resultText } from "./tool-map.js";
 import { TodoBridge, type Todo, type TodoUpdated } from "./todo-bridge.js";
-import { bindMessageEntries, forkConversation, getEntries, navigate, recordTurn, restoreLocalShellTurns, revertConversation, revertNotice, SessionTreeError, unrevertConversation, type SessionTreeState } from "./session-tree.js";
+import { bindMessageEntries, forkConversation, getEntries, navigate, pruneLocalShellTurns, reconcileShellTurns, recordTurn, restoreLocalShellTurns, shellTurnsOnBranch, revertConversation, revertNotice, SessionTreeError, unrevertConversation, type Entries, type TreeEntry, type SessionTreeState } from "./session-tree.js";
 import { SubagentBridge, taskParts, updateTaskParts, taskCompletions } from "./subagents.js";
 import { sessionDiff, touchedFiles } from "./session-diff.js";
 import { announceSessionNotice, shellTitle, shellUserMessage } from "./session-commands.js";
@@ -57,12 +57,14 @@ export interface ManagedSession extends ThinkingState {
   messages: OCMessageWithParts[] | undefined;
   /** Adapter-authored notices/errors remain local; persisted shell cards can be bound. */
   localMessageIds?: Set<string>;
+  /** Cold-adopted unresolved turns need native reconciliation before rendering. */
+  recoverShellTurns?: boolean;
   status: OCSessionStatus;
   /** undefined while dormant; resolved via get_state on create/revive. */
   model: OCModelRef | undefined;
   streaming: StreamingState | undefined;
   /** Cancels the adapter-owned user bash waiter and its OmO execution. */
-  cancelShell?: () => void;
+  cancelShell?: (interrupted?: boolean) => void;
   /**
    * toolCallId → tool part for the current agent run. pi streams tool calls
    * (toolcall_start/delta/end) inside one assistant message but delivers the
@@ -409,7 +411,26 @@ export class SessionManager {
       child.piSessionId = state.sessionId;
       delete child.restored;
       child.model = s.model;
-      child.tree.leafId = (await getEntries(pi)).leafId;
+      const childTree = await getEntries(pi);
+      child.tree.leafId = childTree.leafId;
+      child.tree.localShellTurns = shellTurnsOnBranch(s, childTree).map((turn, index) => {
+        const messages = structuredClone(turn.messages);
+        const stem = `msg_${child.info.id}_local${index}`;
+        for (const [position, message] of messages.entries()) {
+          message.info.id = `${stem}${position === 0 ? "u" : "z"}`;
+          message.info.sessionID = child.info.id;
+          if (message.info.role === "assistant") message.info.parentID = `${stem}u`;
+          for (const [partIndex, part] of message.parts.entries()) {
+            part.id = `prt_${child.info.id}_local${index}_${position}_${partIndex}`;
+            part.sessionID = child.info.id;
+            part.messageID = message.info.id;
+            if (part.type === "tool") part.callID = `call_${child.info.id}_local${index}_${partIndex}`;
+          }
+        }
+        // The copied local attempt was never dispatched in the child.
+        (child.tree.shellDispatch ??= {})[messages[1].info.id] = false;
+        return { afterEntryId: turn.afterEntryId, messages };
+      });
       this.ensureMessages(child);
       this.wirePi(child, pi);
       this.lifecycle.touch(child);
@@ -473,13 +494,21 @@ export class SessionManager {
     else if (s.tree.leafId !== undefined && tree.leafId !== s.tree.leafId) await navigate(pi, s.tree.leafId, signal);
     signal?.throwIfAborted();
     const previous = new Map((s.messages ?? []).map((message) => [message.info.id, message]));
+    const shellIds = new Set(s.tree.localShellTurns?.flatMap((turn) => turn.messages.map((message) => message.info.id)));
     // Notices and shell failures without a JSONL entry remain local.
     const local = [...previous.values()].filter((message) => s.tree.messageEntries[message.info.id] === undefined);
     s.messages = undefined;
-    const messages = this.ensureMessages(s).map((message) => previous.get(message.info.id) ?? message);
+    const messages = this.ensureMessages(s).map((message) => {
+      const old = previous.get(message.info.id);
+      const interrupted = old?.parts.some((part) => part.type === "tool" && part.state.status === "error" && part.state.metadata?.interrupted === true);
+      return interrupted && s.tree.messageEntries[message.info.id] !== undefined ? message : old ?? message;
+    });
     s.messages = messages;
     for (const message of local) {
-      if (!messages.some((item) => item.info.id === message.info.id)) this.appendMessage(sessionId, message);
+      if (!messages.some((item) => item.info.id === message.info.id) &&
+        (!shellIds.has(message.info.id) || s.tree.localShellTurns?.some((turn) => turn.messages.some((item) => item.info.id === message.info.id)))) {
+        this.appendMessage(sessionId, message);
+      }
     }
     const ids = new Set(s.messages.map((message) => message.info.id));
     for (const message of previous.values()) {
@@ -701,6 +730,8 @@ export class SessionManager {
         }
       }
       this.removeRevertNotice(s, revertNotice(s));
+      const activeTree = await getEntries(pi);
+      pruneLocalShellTurns(s, { ...activeTree, leafId: s.tree.leafId === undefined ? activeTree.leafId : s.tree.leafId });
       delete s.tree.revert;
       delete s.info.revert;
       this.persistMeta(s);
@@ -801,7 +832,10 @@ export class SessionManager {
   }
 
   async disposeAll(): Promise<void> {
-    for (const s of this.sessions.values()) s.approvals?.cancelAll();
+    for (const s of this.sessions.values()) {
+      s.approvals?.cancelAll();
+      s.cancelShell?.(true);
+    }
     try {
       await this.lifecycle.stop();
       await (this.hostShutdown ??= stopSessionHosts(this.createdSessions));
@@ -830,6 +864,7 @@ export class SessionManager {
     const restored = s.restored;
     if (restored === undefined) throw new Error(`session is not restorable: ${s.info.id}`);
     if (!existsSync(restored.piPath)) throw new Error(`pi session file is gone: ${restored.piPath}`);
+    if (s.recoverShellTurns) this.ensureMessages(s);
     await this.lifecycle.makeRoom();
     const pi = new PiRpcClient({ cwd: s.info.directory, args: ["--session", restored.piPath], clock: this.lifecycle.clock });
     const state = await pi.command<PiState>({ type: "get_state" }).catch(async (error: unknown) => {
@@ -868,8 +903,13 @@ export class SessionManager {
   private ensureMessages(s: ManagedSession): OCMessageWithParts[] {
     if (this.subagents.owns(s.info.id)) return this.subagents.messages(s.info.id);
     if (s.messages === undefined) {
-      s.messages = restoreLocalShellTurns(s, parsePiSessionFile(s, getAgentName()));
+      const recovering = s.recoverShellTurns;
+      s.messages = parsePiSessionFile(s, getAgentName());
       this.subagents.discover(s, s.messages);
+      if (recovering) {
+        delete s.recoverShellTurns;
+        this.persistMeta(s);
+      }
     }
     return s.messages;
   }
@@ -940,6 +980,7 @@ export class SessionManager {
     };
     const managed: ManagedSession = {
       tree: reg?.tree ?? { messageEntries: {} },
+      ...(reg?.tree?.localShellTurns?.length ? { recoverShellTurns: true } : {}),
       info,
       pi: undefined,
       messages: undefined,
@@ -1545,12 +1586,10 @@ function parsePiSessionText(s: ManagedSession, agentName: string, raw: string): 
   const byId = new Map<string, PiFileEntry>();
   for (const e of entries) if (typeof e.id === "string") byId.set(e.id, e);
 
-  let leaf: PiFileEntry | undefined;
-  for (const e of entries) {
-    if (e.type !== "message") continue;
-    if (leaf === undefined || entryTime(e) >= entryTime(leaf)) leaf = e;
-  }
-  const selectedLeaf = s.tree.revert ? s.tree.revert.previousLeafId : s.tree.leafId;
+  let leaf = [...entries].reverse().find((entry) => entry.type !== "session" && typeof entry.id === "string");
+  const recoveringDispatch = s.recoverShellTurns && s.tree.localShellTurns?.some((turn) =>
+    s.tree.shellDispatch?.[turn.messages[1].info.id] === true && s.tree.messageEntries[turn.messages[1].info.id] === undefined);
+  const selectedLeaf = s.tree.revert ? s.tree.revert.previousLeafId : recoveringDispatch ? undefined : s.tree.leafId;
   if (selectedLeaf !== undefined) leaf = selectedLeaf === null ? undefined : byId.get(selectedLeaf);
   const chain: PiFileEntry[] = [];
   const seen = new Set<PiFileEntry>();
@@ -1560,6 +1599,25 @@ function parsePiSessionText(s: ManagedSession, agentName: string, raw: string): 
     cur = typeof cur.parentId === "string" ? byId.get(cur.parentId) : undefined;
   }
   chain.reverse();
+  const nativeTree: Entries = {
+    leafId: leaf?.id ?? null,
+    entries: entries.flatMap((entry): TreeEntry[] => {
+      if (entry.id === undefined || entry.type === undefined) return [];
+      const m = entry.message;
+      return [{
+        type: entry.type, id: entry.id, parentId: entry.parentId ?? null,
+        ...(m?.role === undefined ? {} : { message: {
+          role: m.role,
+          ...(m.role === "user" ? { content: [{ type: "text", text: textOf(m.content) }] } : {}),
+          ...(m.command === undefined ? {} : { command: m.command }),
+          ...(m.output === undefined ? {} : { output: m.output }),
+          ...(m.exitCode === undefined ? {} : { exitCode: m.exitCode }),
+          ...(m.cancelled === undefined ? {} : { cancelled: m.cancelled }),
+        } }),
+      }];
+    }),
+  };
+  if (s.tree.localShellTurns?.length) reconcileShellTurns(s, nativeTree);
 
   const out: OCMessageWithParts[] = [];
   const toolParts = new Map<string, OCToolPart[]>();
@@ -1763,5 +1821,5 @@ function parsePiSessionText(s: ManagedSession, agentName: string, raw: string): 
       }
     }
   }
-  return out;
+  return restoreLocalShellTurns(s, out, nativeTree);
 }

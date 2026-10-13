@@ -56,6 +56,8 @@ export interface ScannedSession {
 
 /** Adapter-owned metadata that pi's files do not carry. */
 export interface SessionRegistryEntry {
+  /** Created by this connector, rather than discovered from another OmO client. */
+  connectorOwned?: true;
   tree?: SessionTreeState;
   parentID?: string | undefined;
   task?: ChildTask;

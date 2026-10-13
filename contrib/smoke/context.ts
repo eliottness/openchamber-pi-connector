@@ -195,24 +195,34 @@ export class SmokeContext {
     return this.capture().filter((info) => processKind(info.argv) === "rpc");
   }
 
-  async assertShutdownProcesses(signal: AbortSignal = AbortSignal.timeout(16_000)): Promise<void> {
+  async assertShutdownProcesses(): Promise<void> {
     const remaining = this.capture();
-    for (const info of remaining.filter((candidate) => processKind(candidate.argv) === "task-host")) {
-      console.log(`CLEANUP detached task-host pid=${info.pid} cmdline=${info.argv.join(" ")}; expected self-expiry 15 minutes after last client leaves; terminating now`);
+    const rpcGroups = new Set([...this.owned.values()]
+      .filter((info) => processKind(info.argv) === "rpc").map((info) => info.group));
+    // LSP is shared per HOME/version, not per session. Its descendants belong
+    // to OmO unless inside a connector RPC group. Private task shards do not
+    // qualify: the connector must stop those before this assertion is called.
+    const lspGroups = new Set(remaining.filter((info) =>
+      processKind(info.argv) === "detached-service" && !rpcGroups.has(info.group)).map((info) => info.group));
+    const lspPids = new Set<number>();
+    let found = true;
+    while (found) {
+      found = false;
+      for (const info of remaining) {
+        if (lspPids.has(info.pid) || rpcGroups.has(info.group)) continue;
+        if (lspGroups.has(info.group) || lspPids.has(info.ppid)) {
+          lspPids.add(info.pid);
+          lspGroups.add(info.group);
+          found = true;
+        }
+      }
     }
-    for (const info of remaining.filter((candidate) => processKind(candidate.argv) === "detached-service")) {
-      console.log(`CLEANUP detached OmO service pid=${info.pid} cmdline=${info.argv.join(" ")}; terminating now`);
+    assert.deepEqual(remaining.filter((info) => !lspGroups.has(info.group)).map((info) => ({
+      pid: info.pid, cmdline: info.argv.join(" "),
+    })), [], "connector RPC groups, private task hosts and unknown processes must not survive SIGTERM");
+    for (const info of remaining) {
+      console.log(`NON-CONNECTOR OmO-owned, outside connector scope: pid=${info.pid} cmdline=${info.argv.join(" ")}; shared HOME/version LSP infrastructure; default daemon idle expiry 30 minutes`);
     }
-    assert.deepEqual(remaining.filter((info) => {
-      const kind = processKind(info.argv);
-      return kind !== "task-host" && kind !== "detached-service";
-    }).map((info) => ({
-      pid: info.pid, cmdline: info.argv.join(" "),
-    })), [], "connector-spawned RPC and unknown processes must disappear after SIGTERM");
-    await this.terminate(remaining, signal);
-    assert.deepEqual(this.capture().map((info) => ({
-      pid: info.pid, cmdline: info.argv.join(" "),
-    })), [], "owned processes must not survive scoped shutdown cleanup");
   }
 
   async start(signal: AbortSignal, isolatedDiscovery = false, idleTimeoutMs = 900_000, piArgs = process.env.OCPI_PI_ARGS ?? ""): Promise<void> {

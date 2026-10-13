@@ -532,6 +532,153 @@ for (const action of ["read", "refresh", "fork", "notice", "prewarmed-fork", "pr
   });
 }
 
+async function lateNativeReader(t: TestContext) {
+  const { manager, dir, state } = setup(t);
+  const { s, id } = await turns(manager, dir);
+  assert.ok(s.pi);
+  execFileSync("mkfifo", [join(dir, "late-gate")]);
+  const started = Promise.withResolvers<void>();
+  s.pi.onEvent((event) => { if (event.type === "fake_bash_started") started.resolve(); });
+  const pending = runShellCommand({ sessions: manager, session: s, command: "IFS= read -r x < late-gate; echo late-native", emit: () => {} });
+  await started.promise;
+  const saved = new SessionStore(state).get(id);
+  assert.ok(saved?.tree?.localShellTurns?.[0]);
+  const live = saved.tree.localShellTurns[0].messages[1].info;
+  const snapshot = new SessionStore(join(dir, "reader-state"));
+  snapshot.set(id, saved);
+  const reader = new SessionManager(() => {}, snapshot, dir);
+  t.after(() => reader.disposeAll());
+  reader.messages(id);
+  await reader.reloadMessages(id);
+  const recovered = reader.get(id);
+  assert.ok(recovered?.pi);
+  execFileSync("/bin/sh", ["-c", "printf release > late-gate"], { cwd: dir });
+  assert.equal((await pending).kind, "completed");
+  return { manager, dir, s, id, live, reader, recovered, snapshot };
+}
+
+for (const action of ["older-fork", "older-revert", "direct-late-fork"] as const) {
+  test(`idle ${action} compares the complete disk tree before preserving the selected shell`, { timeout: 30_000 }, async (t) => {
+    const { id, live, reader, recovered, snapshot, dir } = await lateNativeReader(t);
+    assert.ok(recovered.pi);
+    if (action !== "direct-late-fork") {
+      assert.ok(reader.messages(id)?.some((message) => message.info.id === live.id));
+      assert.equal((await getEntries(recovered.pi)).entries.some((entry) => entry.id === recovered.tree.leafId), false);
+    }
+    if (action === "older-revert") {
+      const selected = recovered.tree.leafId;
+      await reader.revert(id, "msg_live_3");
+      assert.equal(recovered.tree.revert?.previousLeafId, selected);
+      await reader.unrevert(id);
+    } else await reader.fork(id, action === "older-fork" ? "msg_live_2" : live.id);
+    await reader.disposeAll();
+    const cold = new SessionManager(() => {}, new SessionStore(snapshot.stateDir), dir);
+    t.after(() => cold.disposeAll());
+    assert.ok(cold.messages(id)?.some((message) => message.info.id === live.id));
+    assert.equal(cold.get(id)?.tree.messageEntries[live.id], cold.get(id)?.tree.leafId);
+  });
+}
+
+test("plain binding and refresh cannot move a selected leaf back to its ancestor", { timeout: 30_000 }, async (t) => {
+  const { manager, dir, state } = setup(t);
+  const { s, id, tree: ancestor } = await turns(manager, dir);
+  const shell = await runShellCommand({ sessions: manager, session: s, command: "echo selected", emit: () => {} });
+  assert.equal(shell.kind, "completed");
+  const selected = s.tree.leafId;
+  bindMessageEntries(s, ancestor);
+  assert.equal(s.tree.leafId, selected);
+  assert.ok(s.pi);
+  const original = s.pi.command.bind(s.pi);
+  t.mock.method(s.pi, "command", async (...args: Parameters<PiRpcClient["command"]>) =>
+    args[0].type === "get_entries" ? { type: "response", command: "get_entries", success: true, data: ancestor } : original(...args));
+  await manager.reloadMessages(id);
+  assert.equal(s.tree.leafId, selected);
+  const cold = new SessionManager(() => {}, new SessionStore(state), dir);
+  t.after(() => cold.disposeAll());
+  assert.ok(cold.messages(id)?.some((message) => message.info.id === shell.message.info.id));
+});
+
+for (const outcome of ["cancel", "fail"] as const) {
+  test(`a reopened RPC is discarded when saved navigation reports ${outcome}`, { timeout: 30_000 }, async (t) => {
+    const { manager, s, id, live, reader, recovered } = await lateNativeReader(t);
+    assert.ok(reader.messages(id)?.some((message) => message.info.id === live.id));
+    const selected = recovered.tree.leafId;
+    await manager.revert(id, "msg_live_3");
+    assert.equal((await runShellCommand({ sessions: manager, session: s, command: "echo sibling", emit: () => {} })).kind, "completed");
+    const pi = recovered.pi;
+    assert.ok(pi);
+    const original = pi.command.bind(pi);
+    let switched = false;
+    t.mock.method(pi, "command", async (...args: Parameters<PiRpcClient["command"]>) => {
+      if (args[0].type === "navigate_tree" && switched) {
+        return outcome === "cancel" ?
+          { type: "response", command: "navigate_tree", success: true, data: { cancelled: true, leafId: (await getEntries(pi)).leafId } } :
+          { type: "response", command: "navigate_tree", success: false, error: "Injected navigation refusal" };
+      }
+      const response = await original(...args);
+      if (args[0].type === "switch_session") switched = true;
+      return response;
+    });
+    await assert.rejects(reader.fork(id, live.id), outcome === "cancel" ? /cancelled/ : /Injected navigation refusal/);
+    assert.ok(switched);
+    assert.equal(recovered.pi, undefined);
+    assert.ok(recovered.restored);
+    assert.equal(recovered.tree.leafId, selected);
+    await reader.prompt(id, "after restoration", undefined, false, "msg_after_refusal");
+    assert.ok(recovered.pi);
+    const tree = await getEntries(recovered.pi);
+    assert.equal(tree.entries.find((entry) => entry.id === recovered.tree.messageEntries.msg_after_refusal)?.parentId, selected);
+    assert.equal(recovered.status.type, "idle");
+    assert.ok(reader.messages(id)?.some((message) => message.info.role === "assistant" && message.info.parentID === "msg_after_refusal"));
+  });
+}
+
+test("unrevert refreshes entries appended after its saved navigation pin", { timeout: 30_000 }, async (t) => {
+  const { manager, dir, state } = setup(t);
+  const { id } = await turns(manager, dir);
+  await manager.disposeAll();
+  const reader = new SessionManager(() => {}, new SessionStore(state), dir);
+  const writer = new SessionManager(() => {}, new SessionStore(state), dir);
+  t.after(() => reader.disposeAll());
+  t.after(() => writer.disposeAll());
+  await reader.revert(id, "msg_live_3");
+  await writer.reloadMessages(id);
+  const source = writer.get(id);
+  assert.ok(source?.pi);
+  assert.equal((await runShellCommand({ sessions: writer, session: source, command: "echo external", emit: () => {} })).kind, "completed");
+  const appended = (await getEntries(source.pi)).entries.find((entry) =>
+    entry.message?.role === "bashExecution" && entry.message.command === "echo external")?.id;
+  assert.ok(appended);
+  const recovered = reader.get(id);
+  assert.ok(recovered?.pi);
+  assert.equal((await getEntries(recovered.pi)).entries.some((entry) => entry.id === appended), false);
+  await reader.unrevert(id);
+  assert.ok((await getEntries(recovered.pi)).entries.some((entry) => entry.id === appended));
+  assert.equal(recovered.info.revert, undefined);
+});
+
+test("missing saved leaf revival fails dormant before admitting an unwired prompt", { timeout: 30_000 }, async (t) => {
+  const { manager, dir, state } = setup(t);
+  const { id } = await turns(manager, dir);
+  await manager.disposeAll();
+  const store = new SessionStore(state);
+  const saved = store.get(id);
+  assert.ok(saved?.tree);
+  saved.tree.leafId = "entry-no-longer-present";
+  store.set(id, saved);
+  const cold = new SessionManager(() => {}, new SessionStore(state), dir);
+  t.after(() => cold.disposeAll());
+  await assert.rejects(cold.reloadMessages(id), /entry-no-longer-present/);
+  const recovered = cold.get(id);
+  assert.ok(recovered);
+  assert.equal(recovered.pi, undefined);
+  assert.ok(recovered.restored);
+  await assert.rejects(cold.prompt(id, "must not dispatch", undefined, false, "msg_after_bad_revival"), /entry-no-longer-present/);
+  assert.equal(recovered.pi, undefined);
+  assert.equal(recovered.status.type, "idle");
+  assert.equal(cold.messages(id)?.some((message) => message.info.id === "msg_after_bad_revival"), false);
+});
+
 test("a never-dispatched cancelled shell cannot claim an identical successful run", { timeout: 30_000 }, async (t) => {
   const { manager, dir, state } = setup(t);
   const info = await manager.create(dir);
@@ -840,9 +987,10 @@ test("F2 B1 history refresh waits for an in-flight unrevert and agrees with the 
   };
   const redo = manager.unrevert(id);
   await dispatched.promise;
+  const readsBeforeRefresh = reads;
   const refresh = manager.reloadMessages(id);
   try {
-    assert.equal(reads, 0, "refresh must not dispatch get_entries while unrevert navigation is pending");
+    assert.equal(reads, readsBeforeRefresh, "refresh must not dispatch get_entries while unrevert navigation is pending");
   } finally {
     release.resolve();
     await Promise.all([redo, refresh]);

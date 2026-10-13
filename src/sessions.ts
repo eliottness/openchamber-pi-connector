@@ -14,7 +14,7 @@ import { ApprovalBridge, extensionUiRequestFrom, type PendingPermission, type Pe
 import { getAgentName } from "./agent-name.js";
 import { applyProviderToolResults, finishProviderToolParts, mapTool, providerToolParts, resultMetadata, resultText } from "./tool-map.js";
 import { TodoBridge, type Todo, type TodoUpdated } from "./todo-bridge.js";
-import { bindMessageEntries, durableShellTree, forkConversation, getEntries, navigate, recordTurn, revertConversation, revertNotice, SessionTreeError, unrevertConversation, type Entries, type TreeEntry, type SessionTreeState } from "./session-tree.js";
+import { bindMessageEntries, durableShellTree, forkConversation, getEntries, navigate, readSessionTree, recordTurn, revertConversation, revertNotice, SessionTreeError, unrevertConversation, type Entries, type TreeEntry, type SessionTreeState } from "./session-tree.js";
 import { SubagentBridge, taskParts, updateTaskParts, taskCompletions } from "./subagents.js";
 import { sessionDiff, touchedFiles } from "./session-diff.js";
 import { announceSessionNotice, shellTitle, shellUserMessage } from "./session-commands.js";
@@ -370,20 +370,31 @@ export class SessionManager {
     }
   }
 
-  private async syncTree(s: ManagedSession, operation?: { messageID?: string | undefined }) {
+  private async syncTree(s: ManagedSession, treeOperation = false) {
     const pi = s.pi;
     if (!pi) throw new SessionTreeError("Session has no OmO process");
-    this.ensureMessages(s);
+    if (treeOperation) this.refreshMessageCache(s);
+    else this.ensureMessages(s);
     const admissions = s.tree.localShellTurns?.length;
-    const target = operation && (operation.messageID === undefined ? s.tree.leafId : s.tree.messageEntries[operation.messageID]);
     let tree = await getEntries(pi);
-    if (target !== undefined && target !== null && !tree.entries.some((entry) => entry.id === target)) {
-      // Only idle user tree operations may reopen a runtime that predates its requested native entry.
-      const leaf = s.tree.leafId;
-      const response = await pi.command<{ cancelled?: boolean }>({ type: "switch_session", sessionPath: s.piPath }, 60_000);
-      if (!response.success || response.data?.cancelled) throw new SessionTreeError(response.error ?? "Native tree refresh was cancelled");
-      if (leaf !== undefined) await navigate(pi, leaf);
-      tree = await getEntries(pi);
+    if (treeOperation && s.piPath !== undefined) {
+      const disk = readSessionTree(s.piPath);
+      const known = new Set(tree.entries.map((entry) => entry.id));
+      if (disk.leafId !== tree.leafId || disk.entries.some((entry) => !known.has(entry.id))) {
+        // Only idle user tree operations can replace a stale native runtime.
+        const saved = s.tree.leafId;
+        const response = await pi.command<{ cancelled?: boolean }>({ type: "switch_session", sessionPath: s.piPath }, 60_000);
+        if (!response.success || response.data?.cancelled) throw new SessionTreeError(response.error ?? "Native tree refresh was cancelled");
+        try {
+          const leaf = saved === undefined ? undefined : await navigate(pi, saved);
+          tree = await getEntries(pi);
+          if (leaf !== undefined && tree.leafId !== leaf) throw new SessionTreeError("Native tree refresh did not restore the saved navigation");
+          if (leaf !== undefined) s.tree.leafId = leaf;
+        } catch (error) {
+          await this.lifecycle.dormant(s);
+          throw error;
+        }
+      }
     }
     bindMessageEntries(s, tree);
     if (admissions) this.refreshMessageCache(s);
@@ -407,7 +418,7 @@ export class SessionManager {
 
   async fork(sessionId: string, messageID?: string): Promise<OCSession> {
     return this.treeSession(sessionId, async (s, pi) => {
-      const tree = await this.syncTree(s, { messageID });
+      const tree = await this.syncTree(s, true);
       const state = await forkConversation(s, pi, tree, messageID);
       this.createdSessions.set(state.sessionId, s.info.directory);
       const now = Date.now();
@@ -433,7 +444,7 @@ export class SessionManager {
 
   async revert(sessionId: string, messageID: string): Promise<OCSession> {
     return this.treeSession(sessionId, async (s, pi) => {
-      const tree = await this.syncTree(s, { messageID });
+      const tree = await this.syncTree(s, true);
       const previousNotice = revertNotice(s);
       if (!await revertConversation(s, pi, tree, messageID)) return s.info;
       this.removeRevertNotice(s, previousNotice);
@@ -450,6 +461,7 @@ export class SessionManager {
 
   async unrevert(sessionId: string): Promise<OCSession> {
     return this.treeSession(sessionId, async (s, pi) => {
+      await this.syncTree(s, true);
       const previousNotice = revertNotice(s);
       if (!await unrevertConversation(s, pi)) return s.info;
       this.removeRevertNotice(s, previousNotice);
@@ -480,9 +492,8 @@ export class SessionManager {
     signal?.throwIfAborted();
     bindMessageEntries(s, tree);
     // Compact/bash and extension slash commands can append without agent_end.
-    // Follow their leaf unless reverted; keep both the history and RPC cursor pinned.
-    if (!s.tree.revert) s.tree.leafId = tree.leafId;
-    else if (s.tree.leafId !== undefined && tree.leafId !== s.tree.leafId) await navigate(pi, s.tree.leafId, signal);
+    // Binding follows new descendants, never a stale ancestor of the selection.
+    if (s.tree.revert && s.tree.leafId !== undefined && tree.leafId !== s.tree.leafId) await navigate(pi, s.tree.leafId, signal);
     signal?.throwIfAborted();
     const previous = s.messages ?? [];
     const messages = this.refreshMessageCache(s);
@@ -842,38 +853,32 @@ export class SessionManager {
     this.refreshMessageCache(s);
     await this.lifecycle.makeRoom();
     const pi = new PiRpcClient({ cwd: s.info.directory, args: ["--session", restored.piPath], clock: this.lifecycle.clock });
-    const state = await pi.command<PiState>({ type: "get_state" }).catch(async (error: unknown) => {
-      await pi.dispose();
-      throw error;
-    });
-    if (!state.success || !state.data) {
-      await pi.dispose();
-      throw new Error(`pi get_state failed on resume: ${state.error ?? "no data"}`);
-    }
-    // --session normally restores thinking from JSONL. Reapply when a profile
-    // or runtime default overrides it, before admitting any prompt.
-    const thinking: ThinkingState = state.data.thinkingLevel === undefined ? {} : { thinkingLevel: state.data.thinkingLevel };
     try {
+      const state = await pi.command<PiState>({ type: "get_state" });
+      if (!state.success || !state.data) throw new Error(`pi get_state failed on resume: ${state.error ?? "no data"}`);
+      // Restore selection before publishing a runtime that prompts can use.
+      const thinking: ThinkingState = state.data.thinkingLevel === undefined ? {} : { thinkingLevel: state.data.thinkingLevel };
       await setThinkingLevel(thinking, pi, s.thinkingLevel);
+      const leaf = s.tree.leafId === undefined ? undefined : await navigate(pi, s.tree.leafId);
+      const tree = await getEntries(pi);
+      if (leaf !== undefined && tree.leafId !== leaf) throw new SessionTreeError("Revival did not restore the saved navigation");
+      if (leaf !== undefined) s.tree.leafId = leaf;
+      bindMessageEntries(s, tree);
+      if (thinking.thinkingLevel !== undefined) s.thinkingLevel = thinking.thinkingLevel;
+      s.piPath = restored.piPath;
+      s.piSessionId = restored.piSessionId;
+      s.approvals = this.approvalsFor(s);
+      this.applyPiModel(s, state.data.model?.provider, state.data.model?.id);
+      this.refreshMessageCache(s);
+      this.persistMeta(s);
+      this.wirePi(s, pi);
+      s.pi = pi;
+      delete s.restored;
+      this.lifecycle.touch(s);
     } catch (error) {
       await pi.dispose();
       throw error;
     }
-    if (thinking.thinkingLevel !== undefined) s.thinkingLevel = thinking.thinkingLevel;
-    s.pi = pi;
-    this.lifecycle.touch(s);
-    s.piPath = restored.piPath;
-    s.piSessionId = restored.piSessionId;
-    if (s.tree.leafId !== undefined) s.tree.leafId = await navigate(pi, s.tree.leafId);
-    bindMessageEntries(s, await getEntries(pi));
-    delete s.restored;
-    s.approvals = this.approvalsFor(s);
-    // A restored session pushes pi's real model to the UI rather than leaving
-    // the picker on whatever it last showed for this directory.
-    this.applyPiModel(s, state.data.model?.provider, state.data.model?.id);
-    this.refreshMessageCache(s);
-    this.wirePi(s, pi);
-    this.persistMeta(s);
   }
 
   private ensureMessages(s: ManagedSession): OCMessageWithParts[] {

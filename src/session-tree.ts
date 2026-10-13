@@ -48,12 +48,16 @@ export async function getEntries(pi: PiRpcClient, signal?: AbortSignal): Promise
   return response.data;
 }
 
+export function readSessionTree(piPath: string): Entries {
+  const entries: TreeEntry[] = readFileSync(piPath, "utf8").trim().split("\n")
+    .filter((line) => line.length !== 0).map((line) => JSON.parse(line) as TreeEntry)
+    .filter((entry) => entry.type !== "session" && typeof entry.id === "string");
+  return { entries, leafId: entries.at(-1)?.id ?? null };
+}
+
 /** agent_end runs after message persistence; no async lease or timing race. */
 export function recordTurn(s: ManagedSession): void {
-  if (!s.piPath) return;
-  const entries: TreeEntry[] = readFileSync(s.piPath, "utf8").trim().split("\n")
-    .map((line) => JSON.parse(line) as TreeEntry).filter((entry) => entry.type !== "session");
-  bindMessageEntries(s, { entries, leafId: entries.at(-1)?.id ?? null });
+  if (s.piPath) bindMessageEntries(s, readSessionTree(s.piPath));
 }
 
 export function branchEntries(tree: Entries, leafId = tree.leafId): TreeEntry[] {
@@ -70,7 +74,14 @@ export function branchEntries(tree: Entries, leafId = tree.leafId): TreeEntry[] 
 
 /** Live ids belong to the UI; restored ids belong to JSONL offsets. Save both. */
 export function bindMessageEntries(s: ManagedSession, tree: Entries): void {
-  const branch = branchEntries(tree, s.tree.revert ? s.tree.revert.previousLeafId : tree.leafId);
+  let leafId = tree.leafId;
+  if (!s.tree.revert && s.tree.leafId !== undefined && s.tree.leafId !== null) {
+    const selected = branchEntries(tree, s.tree.leafId);
+    // A stale snapshot cannot discard a selection or its identity candidates.
+    if (selected.length === 0) return;
+    if (tree.leafId === null || selected.some((entry) => entry.id === tree.leafId)) leafId = s.tree.leafId;
+  }
+  const branch = branchEntries(tree, s.tree.revert ? s.tree.revert.previousLeafId : leafId);
   const positions = new Map(branch.map((entry, index) => [entry.id, index]));
   s.tree.localShellTurns = (s.tree.localShellTurns ?? []).filter((turn) => {
     if (turn.afterEntryId === null || positions.has(turn.afterEntryId)) return true;
@@ -145,7 +156,7 @@ export function bindMessageEntries(s: ManagedSession, tree: Entries): void {
   }
   // Syncs/agent events preserve an active revert's navigation pin. Only
   // revert/unrevert select it explicitly; prompt clears the pin before branching.
-  if (!s.tree.revert) s.tree.leafId = tree.leafId;
+  if (!s.tree.revert) s.tree.leafId = leafId;
   s.tree.localShellTurns = s.tree.localShellTurns.filter((turn) => s.tree.messageEntries[turn.messages[1].info.id] === undefined);
 }
 

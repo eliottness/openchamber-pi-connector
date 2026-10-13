@@ -426,7 +426,10 @@ export class SubagentBridge {
     const response = JSON.stringify({
       type: "message", id: "result", parentId: "request", timestamp: child.session.info.time.updated,
       message: { role: "assistant", provider: resolved.provider ?? model.split("/")[0], model: resolved.model_id ?? model.split("/").slice(1).join("/"),
-        content: [{ type: "text", text }], usage: { input: stats.input_tokens, output: stats.output_tokens, cacheRead: stats.cache_read_tokens, cacheWrite: stats.cache_write_tokens, cost: { total: stats.cost_usd } } },
+        // run_stats tokens are totals across the whole run (every model call),
+        // not one request's context, so only the cost is carried as usage; the
+        // totals stay in the text above. Token counts here read as context fill.
+        content: [{ type: "text", text }], usage: { cost: { total: stats.cost_usd } } },
     });
     return this.parse(child.session, `${request}\n${response}\n`);
   }

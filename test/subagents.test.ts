@@ -291,7 +291,10 @@ test("missing transcript renders final response usage and retention notice", (t)
   assert.ok(info?.role === "assistant");
   assert.equal(info.parentID, messages?.find((message) => message.info.role === "user")?.info.id);
   assert.equal(info.cost, 0.01);
-  assert.equal(info.tokens.input, 30);
+  // Run totals are summed over every model call, not one context window, so
+  // they must not drive OpenChamber's context fill (it showed 999%).
+  assert.deepEqual(info.tokens, { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } });
+  assert.match(texts(messages), /Tokens: 50/);
   assert.equal(info.modelID, "haiku");
   assert.ok(!texts(messages).includes("[task_id:"));
 });

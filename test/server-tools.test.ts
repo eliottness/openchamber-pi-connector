@@ -274,6 +274,30 @@ test("Python repr escapes preserve the exact query rather than dropping valid ca
   }
 });
 
+for (const later of ["toolUse", "stop"]) {
+  test(`F2 S9 a later ${later} turn keeps an earlier aborted server call Cancelled in history`, (t) => {
+    const dir = mkdtempSync(join(tmpdir(), "ocpi-native-run-boundary-"));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const piPath = join(dir, "session.jsonl");
+    const laterContent = later === "toolUse"
+      ? [{ type: "toolCall", id: "read", name: "read", arguments: { path: "/tmp/a" } }]
+      : [{ type: "text", text: "Finished" }];
+    writeFileSync(piPath, [
+      { type: "message", id: "e0", parentId: null, message: { role: "assistant", timestamp: 1000, stopReason: "aborted", content: [fixture.content[1]] } },
+      { type: "message", id: "e1", parentId: "e0", message: { role: "user", timestamp: 2000, content: [{ type: "text", text: "Read a file instead" }] } },
+      { type: "message", id: "e2", parentId: "e1", message: { role: "assistant", timestamp: 3000, stopReason: later, content: laterContent } },
+    ].map((entry) => JSON.stringify(entry)).join("\n"));
+    const manager = new SessionManager(() => {}, new SessionStore(join(dir, "state")));
+    t.after(() => manager.disposeAll());
+    const restored = session(piPath);
+    restored.messages = undefined;
+    const part = tools(manager["ensureMessages"](restored)[0]?.parts ?? [])[0];
+    assert.ok(part?.state.status === "error");
+    assert.equal(part.state.error, "Cancelled");
+    assert.equal(part.state.time.end, 1000);
+  });
+}
+
 for (const reason of ["toolUse", "stop", "aborted", "error"]) {
   test(`unresolved server call with ${reason} is never successful live or in history`, async (t) => {
     const dir = mkdtempSync(join(tmpdir(), "ocpi-native-incomplete-"));

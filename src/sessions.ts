@@ -1565,6 +1565,15 @@ function parsePiSessionText(s: ManagedSession, agentName: string, raw: string): 
   const toolParts = new Map<string, OCToolPart[]>();
   let currentModel: OCModelRef = { providerID: "unknown", modelID: "unknown" };
   let lastUserId = "";
+  // Like live agent_end, a new user turn closes the previous run: its own
+  // unresolved provider cards end with that run's stop reason.
+  let runAssistant: PiFileEntry | undefined;
+  const endRun = (): void => {
+    if (runAssistant === undefined) return;
+    finishProviderToolParts([...toolParts.values()].flat(), entryTime(runAssistant),
+      runAssistant.message?.stopReason === "aborted" ? "Cancelled" : "No result");
+    runAssistant = undefined;
+  };
 
   for (const e of chain) {
     if (e.type === "model_change" && typeof e.provider === "string" && typeof e.modelId === "string") {
@@ -1578,6 +1587,7 @@ function parsePiSessionText(s: ManagedSession, agentName: string, raw: string): 
     const created = entryTime(e);
 
     if (m.role === "user") {
+      endRun();
       const text = textOf(m.content);
       if (text === "") continue;
       const msgId = Object.keys(s.tree.messageEntries).find((key) => s.tree.messageEntries[key] === e.id) ?? `msg_${sessionID}_r${idx}`;
@@ -1633,6 +1643,7 @@ function parsePiSessionText(s: ManagedSession, agentName: string, raw: string): 
     }
 
     if (m.role === "assistant") {
+      runAssistant = e;
       if (typeof m.provider === "string" && typeof m.model === "string") {
         currentModel = { providerID: m.provider, modelID: m.model };
       }

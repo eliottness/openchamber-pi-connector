@@ -10,6 +10,6 @@ export function register(check: Check, context: SmokeContext): void {
     const death = context.waitForDeath(pids, 15_000, signal);
     await context.stop(signal);
     await death;
-    context.assertNoOwnedProcesses();
-  }, { dependsOn: ["idle-reaping"] });
+    context.assertShutdownProcesses();
+  }, { dependsOn: ["fork-revert"] });
 }

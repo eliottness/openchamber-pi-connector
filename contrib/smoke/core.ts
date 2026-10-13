@@ -1,4 +1,7 @@
 import type { OCEvent } from "../../src/types.js";
+import type { TodoUpdated } from "../../src/todo-bridge.js";
+
+export type SmokeEvent = OCEvent | TodoUpdated;
 
 export interface CheckOptions {
   timeoutMs?: number;
@@ -92,8 +95,8 @@ export class SmokeRegistry {
 
 /** Future-only waits prevent an earlier idle/delta from satisfying a new turn. */
 export class SseCollector {
-  readonly events: OCEvent[] = [];
-  private waiters = new Set<{ predicate: (event: OCEvent) => boolean; resolve: (event: OCEvent) => void; reject: (error: Error) => void }>();
+  readonly events: SmokeEvent[] = [];
+  private waiters = new Set<{ predicate: (event: SmokeEvent) => boolean; resolve: (event: SmokeEvent) => void; reject: (error: Error) => void }>();
   private controller = new AbortController();
   private pumping: Promise<void> | undefined;
 
@@ -122,7 +125,7 @@ export class SseCollector {
           buffer = buffer.slice(end + 2);
           const data = frame.split("\n").find((line) => line.startsWith("data:"));
           if (!data) continue;
-          const event: OCEvent = JSON.parse(data.slice(5));
+          const event: SmokeEvent = JSON.parse(data.slice(5));
           this.events.push(event);
           for (const waiter of [...this.waiters]) {
             if (waiter.predicate(event)) waiter.resolve(event);
@@ -137,8 +140,8 @@ export class SseCollector {
     }
   }
 
-  waitForEvent(predicate: (event: OCEvent) => boolean, timeoutMs: number, signal?: AbortSignal): Promise<OCEvent> {
-    const promise = new Promise<OCEvent>((resolve, reject) => {
+  waitForEvent(predicate: (event: SmokeEvent) => boolean, timeoutMs: number, signal?: AbortSignal): Promise<SmokeEvent> {
+    const promise = new Promise<SmokeEvent>((resolve, reject) => {
       const finish = (): void => {
         clearTimeout(timer);
         this.waiters.delete(waiter);
@@ -146,7 +149,7 @@ export class SseCollector {
       };
       const waiter = {
         predicate,
-        resolve: (event: OCEvent) => { finish(); resolve(event); },
+        resolve: (event: SmokeEvent) => { finish(); resolve(event); },
         reject: (error: Error) => { finish(); reject(error); },
       };
       const abort = (): void => waiter.reject(new Error("SSE wait cancelled"));

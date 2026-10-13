@@ -14,15 +14,25 @@ connector state under `/tmp/ocomo-qa/smoke-<timestamp>-<suffix>`. No existing
 session receives prompts. The private directory, including credentials,
 is removed on completion, failure, SIGINT, or SIGTERM.
 
-The throwaway project's `.omo/omo.jsonc` sets
-`task.host_shard_prewarm: "off"`. OmO otherwise speculatively starts shared
-task-host daemons on the first chat turn, although part A never invokes a task.
-Those shared hosts have their own 15-minute idle policy, outside the connector's
-session process group. This setting disables only speculative warming, not task
-execution, extensions, or permissions. Part B must check the lifecycle of hosts
-it actually starts through task calls; part A does not prove daemon shutdown in
-a deployment with speculative warming enabled. Inherited RPC socket, watchdog,
-and cleanup-path variables are stripped so QA cannot attach to the caller's host.
+OmO uses the copied configuration unchanged, including speculative task-host
+prewarming. Detached task-host supervisors and their multi-session engines have
+a 15-minute idle policy after their last client leaves. Shutdown fails if any
+connector session RPC process survives SIGTERM, but reports surviving detached
+hosts as INFO with PID, command line, and expected self-expiry. Harness cleanup
+then terminates those hosts. A workspace-owned detached OmO LSP daemon is also
+reported as INFO and terminated by scoped cleanup; session RPCs and unknown
+processes remain strict shutdown failures. Inherited RPC socket, watchdog, and
+cleanup-path variables are stripped so QA cannot attach to the caller's host.
+The isolated HOME also passes OmO's documented onboarding-disable CLI flag:
+the smoke tests product behavior, not the first-run tour, and an onboarding
+turn would otherwise race the checks' prompt-specific idle events.
+
+Part B1 adds tool-card input/history checks, phased todos, one foreground quick
+subagent with live child tools and an archived transcript, allow-once and deny
+approvals, and conversation-only fork/revert/unrevert with a file SHA256 check.
+The approval check temporarily restarts with `--permission-preset ask`; it does
+not change any configuration file. Compact/shell/commands/share and diff/routes
+checks are reserved for part B2.
 
 ## Part B extension
 
@@ -71,6 +81,13 @@ with no body are GET; calls with a body are POST. The created session remains
 available after the base restart and reaping checks. The final shutdown check
 asserts disappearance before fallback cleanup can hide a lifecycle failure.
 
-Cleanup samples only descendants of its own connector launcher and remembers
-PID start times and process groups. It never kills by command-line pattern.
+Cleanup samples descendants of its own connector launcher and remembers PID
+start times and process groups. Reparented processes are adopted only when
+`/proc/<pid>/cwd` is inside this run's unique root AND `/proc/<pid>/environ`
+contains an exact private HOME or coding-agent directory. A command-line match
+alone never establishes ownership. The supervisor flag and multi-session flag
+classify owned hosts, and the exact OmO LSP daemon entrypoint classifies the
+detached language service; ordinary `--mode rpc` and unknown processes remain
+strict shutdown failures. Cleanup asserts no owned processes remain before
+removing the workspace. It never kills by command-line pattern.
 Linux `/proc` and GNU `tail --pid` are required for lifecycle checks.

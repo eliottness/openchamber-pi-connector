@@ -336,6 +336,19 @@ export class SubagentBridge {
       if (useRecord && !staleRunning) child.task.details = { ...child.task.details, ...found.data };
       const host = found.data.host_session;
       if (record(host) && typeof host.session_path === "string") child.livePath = host.session_path;
+      else if (typeof found.data.child_session_id === "string" && found.data.child_session_id !== "") {
+        // In-process agents persist under the task store but have no RPC host_session.
+        // Match the recorded session, not another retained run in the same directory.
+        const sessions = join(dirname(dirname(found.path)), "children", child.task.id, "sessions", child.task.id);
+        try {
+          const file = readdirSync(sessions, { withFileTypes: true }).find((entry) =>
+            entry.isFile() && entry.name.endsWith(`_${found.data.child_session_id}.jsonl`));
+          child.livePath = file ? join(sessions, file.name) : undefined;
+        } catch (error) {
+          if (!(error instanceof Error && "code" in error && ["ENOENT", "ENOTDIR", "EACCES"].includes(String(error.code)))) throw error;
+          child.livePath = undefined;
+        }
+      }
     }
     const running = active(child.task.details.status) && (found !== undefined || child.live);
     const previousMessages = child.session.messages ?? [];

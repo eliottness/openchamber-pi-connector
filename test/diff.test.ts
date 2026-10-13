@@ -76,6 +76,24 @@ test("non-git files list without hunks and escaping paths never disclose content
   assert.equal(diff[0]?.additions, 0);
 });
 
+test("connector patches ignore external diff for tracked and untracked files", async (t) => {
+  const dir = temp(t);
+  git(dir, "init", "-q");
+  writeFileSync(join(dir, "tracked.txt"), "before\n");
+  git(dir, "add", ".");
+  git(dir, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "baseline");
+  git(dir, "config", "diff.external", "/bin/echo");
+  writeFileSync(join(dir, "tracked.txt"), "after\n");
+  writeFileSync(join(dir, "new.txt"), "created\n");
+  assert.doesNotMatch(git(dir, "diff", "--", "tracked.txt"), /^@@/m);
+  const diffs = await sessionDiff(dir, messages("tracked.txt", "new.txt"));
+  assert.deepEqual(diffs.map(({ before, after, additions, deletions }) => ({ before, after, additions, deletions })), [
+    { before: "before\n", after: "after\n", additions: 1, deletions: 1 },
+    { before: "", after: "created\n", additions: 1, deletions: 0 },
+  ]);
+  for (const diff of diffs) assert.match(diff.patch, /^@@ /m);
+});
+
 test("only completed mapped editing tools contribute files", () => {
   const failed = tool("failed");
   failed.state = { status: "error", input: { filePath: "failed" }, error: "", time: { start: 0, end: 1 } };

@@ -77,6 +77,45 @@ HTTP 400 before navigation.
 | `permission.asked` | pi extension-UI sub-protocol (`extension_ui_request`/`extension_ui_response`) — semantics differ, map conservatively |
 | `session.error` | `extension_error`, RPC error responses |
 
+### User shell cancellation and extension commands
+
+The installed OmO RPC exposes two different abort commands. `abort` acknowledges
+an agent-turn interruption but does not stop a user `bash` RPC. `abort_bash`
+aborts the active user-shell execution. Probes on 2026-10-13 with
+`omo --mode rpc --no-session --model anthropic/claude-haiku-4-5` observed:
+
+- `abort` returned `{success: true}` while the same OS `sleep 600` process
+  remained alive and the bash request remained unanswered.
+- In a separate probe, `abort_bash` returned `{success: true}` and the pending
+  bash returned `{output: "", cancelled: true, truncated: false}` within
+  10 milliseconds. Both observed sleep PIDs were gone after `abort_bash`.
+  A cancelled result can omit `exitCode`; the adapter normalizes it to `null`.
+
+The connector dispatches `abort_bash` for an active shell before ordinary
+`abort`, releases its correlated bash waiter immediately, and emits an error
+tool state with `metadata.cancelled: true` and `Command cancelled`. The composer
+returns to idle without waiting for the 60-second transport deadline. Removing
+the correlation and its timeout prevents a late response from completing or
+duplicating the cancelled card, reloading history, or changing a resumed turn.
+The same abort signal covers the follow-up history and navigation RPCs, so
+Stop also releases a shell whose bash result arrived but whose history refresh
+is still pending. Aborted refresh replies are discarded before history mutation.
+The adapter dispatch is not itself proof that an arbitrary remote shell has
+stopped; the real local OmO probe and manual QA check the OS process as well.
+
+Print-only extension commands do not necessarily emit `agent_start` or
+`agent_end`. The real `get_commands` catalog includes `/ttsr`, which reports
+its status through `extension_ui_request {method: "notify"}` and returns
+`prompt {success: true, data: {disposition: "handled"}}`. The connector renders
+notifications received during a slash invocation as assistant text and treats
+that handled response as completion, returning the session to idle. Prompts
+that start an agent turn still use the agent lifecycle events for completion.
+
+The full probe transcript is
+`~/.omo/evidence/openchamber-omo-connector/task-18/rpc-probe.jsonl`; browser
+captures and timings are in the same directory. This is a connector-only
+mapping of the installed OmO protocol, not a change to OmO or its settings.
+
 ### Capability gaps to decide explicitly
 
 - **Permissions/questions**: OpenCode has permission prompts and elicitation;

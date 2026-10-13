@@ -146,7 +146,7 @@ export function parseShellResult(value: unknown): ShellResult {
   if (
     !isRecord(value) ||
     typeof value.output !== "string" ||
-    (typeof value.exitCode !== "number" && value.exitCode !== null) ||
+    (typeof value.exitCode !== "number" && value.exitCode !== null && !(value.cancelled === true && value.exitCode === undefined)) ||
     typeof value.cancelled !== "boolean" ||
     typeof value.truncated !== "boolean"
   ) {
@@ -154,7 +154,7 @@ export function parseShellResult(value: unknown): ShellResult {
   }
   return {
     output: value.output,
-    exitCode: value.exitCode,
+    exitCode: typeof value.exitCode === "number" ? value.exitCode : null,
     cancelled: value.cancelled,
     truncated: value.truncated,
   };
@@ -181,7 +181,7 @@ export function createShellMessage(session: ManagedSession, command: string): Sh
   return { info, parts: [part] };
 }
 
-export function announceSessionError(context: ShareNoticeContext, errorName: string, messageText: string): void {
+export function announceSessionNotice(context: ShareNoticeContext, messageText: string): void {
   const { session, sessions, emit } = context;
   const messages = sessions.messages(session.info.id);
   if (!messages) return;
@@ -200,9 +200,13 @@ export function announceSessionError(context: ShareNoticeContext, errorName: str
   messages.push(message);
   emit(session.info.directory, { type: "message.updated", properties: { info } });
   emit(session.info.directory, { type: "message.part.updated", properties: { part } });
-  emit(session.info.directory, {
+}
+
+export function announceSessionError(context: ShareNoticeContext, errorName: string, messageText: string): void {
+  announceSessionNotice(context, messageText);
+  context.emit(context.session.info.directory, {
     type: "session.error",
-    properties: { sessionID: session.info.id, error: { name: errorName, data: { message: messageText } } },
+    properties: { sessionID: context.session.info.id, error: { name: errorName, data: { message: messageText } } },
   });
 }
 
@@ -220,13 +224,14 @@ export function completeShellMessage(message: ShellMessage, command: string, res
   message.info.time.completed = Date.now();
 }
 
-export function failShellMessage(message: ShellMessage, command: string, error: string): void {
+export function failShellMessage(message: ShellMessage, command: string, error: string, metadata?: Record<string, unknown>): void {
   const [part] = message.parts;
   const started = part.state.status === "pending" ? Date.now() : part.state.time.start;
   part.state = {
     status: "error",
     input: { command, description: command },
     error,
+    ...(metadata !== undefined ? { metadata } : {}),
     time: { start: started, end: Date.now() },
   };
   message.info.time.completed = Date.now();
@@ -242,25 +247,45 @@ export async function runShellCommand(context: ShellCommandContext): Promise<She
   const { session, sessions, command } = context;
   const messages = sessions.messages(session.info.id) ?? [];
   const message = createShellMessage(session, command);
+  const controller = new AbortController();
+  session.cancelShell = () => {
+    delete session.cancelShell;
+    // Agent abort does not stop user bash. Dispatch the dedicated RPC first,
+    // then release our waiter; a correlated late response is discarded.
+    session.pi?.notify({ type: "abort_bash" });
+    controller.abort();
+  };
   messages.push(message);
   setShellStatus(context, "busy");
   emitShellMessage(context, message);
   try {
-    const response = await sessions.sessionRpc<unknown>(session.info.id, { type: "bash", command });
+    const response = await sessions.sessionRpc<unknown>(session.info.id, { type: "bash", command }, controller.signal);
+    if (controller.signal.aborted) throw controller.signal.reason;
     if (!response.success) {
       const error = response.error ?? "OmO bash failed";
       failShellMessage(message, command, error);
       emitShellMessage(context, message);
       return { kind: "error", message: error };
     }
-    completeShellMessage(message, command, parseShellResult(response.data));
+    const result = parseShellResult(response.data);
+    if (result.cancelled) {
+      failShellMessage(message, command, "Command cancelled", { cancelled: true, exitCode: result.exitCode });
+    } else {
+      completeShellMessage(message, command, result);
+    }
     emitShellMessage(context, message);
     return { kind: "completed", message };
   } catch (error) {
+    if (controller.signal.aborted) {
+      failShellMessage(message, command, "Command cancelled", { cancelled: true });
+      emitShellMessage(context, message);
+      return { kind: "completed", message };
+    }
     failShellMessage(message, command, error instanceof Error ? error.message : String(error));
     emitShellMessage(context, message);
     throw error;
   } finally {
+    delete session.cancelShell;
     setShellStatus(context, "idle");
   }
 }

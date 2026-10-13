@@ -15,6 +15,7 @@ import { TodoBridge, type Todo, type TodoUpdated } from "./todo-bridge.js";
 import { bindMessageEntries, forkConversation, getEntries, navigate, recordTurn, revertConversation, revertNotice, SessionTreeError, unrevertConversation, type SessionTreeState } from "./session-tree.js";
 import { SubagentBridge, taskParts, updateTaskParts, taskCompletions } from "./subagents.js";
 import { sessionDiff, touchedFiles } from "./session-diff.js";
+import { announceSessionNotice } from "./session-commands.js";
 import { debugLog } from "./misc-routes.js";
 import { ocIdFor, piSessionDir, piSessionsRootMtime, scanAllPiSessions, scanPiSessions, SessionStore, type ScannedSession } from "./session-store.js";
 import type {
@@ -56,6 +57,8 @@ export interface ManagedSession {
   /** undefined while dormant; resolved via get_state on create/revive. */
   model: OCModelRef | undefined;
   streaming: StreamingState | undefined;
+  /** Cancels the adapter-owned user bash waiter and its OmO execution. */
+  cancelShell?: () => void;
   /**
    * toolCallId → tool part for the current agent run. pi streams tool calls
    * (toolcall_start/delta/end) inside one assistant message but delivers the
@@ -423,18 +426,20 @@ export class SessionManager {
     if (notice) this.emit(s.info.directory, { type: "message.removed", properties: { sessionID: s.info.id, messageID: notice.info.id } });
   }
 
-  async reloadMessages(sessionId: string): Promise<OCMessageWithParts[] | undefined> {
+  async reloadMessages(sessionId: string, signal?: AbortSignal): Promise<OCMessageWithParts[] | undefined> {
     const s = this.get(sessionId);
     if (!s) return undefined;
     return this.lifecycle.use(s, async () => {
       if (!s.pi) await this.revive(s);
       const pi = s.pi;
       if (!pi) throw new SessionTreeError("Session cannot be resumed");
-      const tree = await getEntries(pi);
+      const tree = await getEntries(pi, signal);
+      signal?.throwIfAborted();
       // Compact/bash and extension slash commands can append without agent_end.
       // Follow their leaf unless reverted; keep both the history and RPC cursor pinned.
       if (!s.tree.revert) s.tree.leafId = tree.leafId;
-      else if (s.tree.leafId !== undefined && tree.leafId !== s.tree.leafId) await navigate(pi, s.tree.leafId);
+      else if (s.tree.leafId !== undefined && tree.leafId !== s.tree.leafId) await navigate(pi, s.tree.leafId, signal);
+      signal?.throwIfAborted();
       const previous = new Map((s.messages ?? []).map((message) => [message.info.id, message]));
       // Adapter-only shell/error cards have no JSONL entry; retain them on reload.
       const local = [...previous.values()].filter((message) => s.tree.messageEntries[message.info.id] === undefined);
@@ -493,6 +498,7 @@ export class SessionManager {
   async abort(sessionId: string): Promise<boolean> {
     const s = this.get(sessionId);
     if (!s) return false;
+    s.cancelShell?.();
     if (s.pi === undefined) {
       this.subagents.stopParent(sessionId);
       return true; // dormant sessions are idle by definition
@@ -536,6 +542,7 @@ export class SessionManager {
   async sessionRpc<T = unknown>(
     sessionId: string,
     command: Omit<PiRpcCommand, "id">,
+    signal?: AbortSignal,
   ): Promise<PiRpcResponse & { data?: T }> {
     const s = this.get(sessionId);
     if (!s) throw new Error(`unknown session: ${sessionId}`);
@@ -544,8 +551,8 @@ export class SessionManager {
       const pi = s.pi;
       if (pi === undefined) throw new Error(`session cannot be resumed: ${sessionId}`);
       this.lifecycle.touch(s);
-      const response = await pi.command<T>(command);
-      if (response.success && (command.type === "compact" || command.type === "bash")) await this.reloadMessages(sessionId);
+      const response = await pi.command<T>(command, 60_000, signal);
+      if (!signal?.aborted && response.success && (command.type === "compact" || command.type === "bash")) await this.reloadMessages(sessionId, signal);
       return response;
     });
   }
@@ -693,9 +700,17 @@ export class SessionManager {
 
     // pi streams asynchronously after accepting the prompt.
     this.setStatus(s, { type: "busy" });
+    const onNotification = (request: Record<string, unknown>): void => {
+      if (request.method === "notify" && typeof request.message === "string") {
+        announceSessionNotice({ sessions: this, session: s, emit: this.emit }, request.message);
+      }
+    };
+    if (text.startsWith("/")) pi.onExtensionUI(onNotification);
     const res = await pi.command({ type: "prompt", message: text }).catch((error: unknown) => {
       this.setStatus(s, { type: "idle" });
       throw error;
+    }).finally(() => {
+      pi.off("extension_ui_request", onNotification);
     });
     if (!res.success) {
       this.setStatus(s, { type: "idle" });
@@ -707,6 +722,11 @@ export class SessionManager {
         },
       });
       return;
+    }
+    // Extension commands can finish without starting an agent turn.
+    if (res.data !== null && typeof res.data === "object" && "disposition" in res.data && res.data.disposition === "handled") {
+      this.setStatus(s, { type: "idle" });
+      this.emit(s.info.directory, { type: "session.idle", properties: { sessionID: s.info.id } });
     }
 
     // First message makes pi write the session file — bind it now so the

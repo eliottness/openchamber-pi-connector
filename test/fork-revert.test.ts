@@ -414,7 +414,41 @@ test("an older cached ancestor cannot carry a later queued attempt across either
   assert.equal(cold.messages(info.id)?.some((message) => message.info.id === queued.info.id), false);
 });
 
-for (const action of ["read", "refresh", "fork", "notice"] as const) {
+test("revival preserves an unreverted native branch instead of adopting its latest sibling", { timeout: 30_000 }, async (t) => {
+  const { manager, dir, state } = setup(t);
+  const { id } = await turns(manager, dir);
+  await manager.revert(id, "msg_live_3");
+  const session = manager.get(id);
+  assert.ok(session);
+  const shell = await runShellCommand({ sessions: manager, session, command: "echo sibling", emit: () => {} });
+  assert.equal(shell.kind, "completed");
+  await manager.unrevert(id);
+  const selected = session.tree.leafId;
+  assert.ok(manager.messages(id)?.some((message) => message.info.id === "msg_live_3"));
+  await manager.disposeAll();
+  const cold = new SessionManager(() => {}, new SessionStore(state), dir);
+  t.after(() => cold.disposeAll());
+  assert.ok(cold.messages(id)?.some((message) => message.info.id === "msg_live_3"));
+  await cold.reloadMessages(id);
+  const revived = cold.get(id);
+  assert.ok(revived?.pi);
+  assert.equal(revived.tree.leafId, selected);
+  assert.equal((await getEntries(revived.pi)).leafId, selected);
+  assert.ok(cold.messages(id)?.some((message) => message.info.id === "msg_live_3"));
+  await cold.revert(id, "msg_live_2");
+  const pin = revived.tree.leafId;
+  await cold.disposeAll();
+  const pinned = new SessionManager(() => {}, new SessionStore(state), dir);
+  t.after(() => pinned.disposeAll());
+  await pinned.reloadMessages(id);
+  const restoredPin = pinned.get(id);
+  assert.ok(restoredPin?.pi);
+  assert.equal(restoredPin.tree.leafId, pin);
+  assert.equal((await getEntries(restoredPin.pi)).leafId, pin);
+  assert.equal(restoredPin.tree.revert?.messageID, "msg_live_2");
+});
+
+for (const action of ["read", "refresh", "fork", "notice", "prewarmed-fork", "prewarmed-revert"] as const) {
   test(`an invisible admission binds a later native result on normal ${action}`, { timeout: 30_000 }, async (t) => {
     const { manager, dir, state } = setup(t);
     const info = await manager.create(dir);
@@ -436,6 +470,20 @@ for (const action of ["read", "refresh", "fork", "notice"] as const) {
     t.after(() => cold.disposeAll());
     const initial = cold.messages(info.id)?.find((message) => message.info.id === live.info.id);
     assert.equal(initial, undefined);
+    const switches: string[] = [];
+    if (action.startsWith("prewarmed")) {
+      await cold.reloadMessages(info.id);
+      const recovered = cold.get(info.id);
+      assert.ok(recovered?.pi, "RPC must be revived before the original writer produces its outcome");
+      const original = recovered.pi.command.bind(recovered.pi);
+      t.mock.method(recovered.pi, "command", async <T>(...args: Parameters<PiRpcClient["command"]>) => {
+        if (args[0].type === "switch_session") {
+          switches.push(recovered.status.type);
+          if (recovered.status.type === "busy") await original({ type: "abort" });
+        }
+        return original<T>(...args);
+      });
+    }
     let noticeID: string | undefined;
     if (action === "notice") {
       const recovered = cold.get(info.id);
@@ -447,7 +495,24 @@ for (const action of ["read", "refresh", "fork", "notice"] as const) {
     execFileSync("/bin/sh", ["-c", "printf 'release\\n' > late-gate"], { cwd: dir });
     const completed = await pending;
     assert.equal(completed.kind, "completed");
-    if (action === "fork") await cold.fork(info.id, live.info.id);
+    if (action.startsWith("prewarmed")) {
+      assert.ok(cold.messages(info.id)?.some((message) => message.info.id === live.info.id));
+      if (action === "prewarmed-fork") await cold.fork(info.id, live.info.id);
+      else {
+        await cold.revert(info.id, live.info.parentID);
+        await cold.unrevert(info.id);
+      }
+      await cold.prompt(info.id, "pending-turn", undefined, false, "msg_after_recovery");
+      const recovered = cold.get(info.id);
+      assert.ok(recovered?.pi);
+      assert.equal(recovered.status.type, "busy", "prompt admission must not reopen native after recovery");
+      const finished = Promise.withResolvers<void>();
+      recovered.pi.onEvent((event) => { if (event.type === "agent_idle") finished.resolve(); });
+      await recovered.pi.command({ type: "finish_pending_turn" });
+      await finished.promise;
+      assert.ok(switches.every((status) => status === "idle"));
+      assert.ok(cold.messages(info.id)?.some((message) => message.info.role === "assistant" && message.info.parentID === "msg_after_recovery"));
+    } else if (action === "fork") await cold.fork(info.id, live.info.id);
     else if (action !== "read") await cold.reloadMessages(info.id);
     const restored = cold.messages(info.id)?.find((message) => message.info.id === live.info.id);
     assert.ok(restored?.parts[0]?.type === "tool" && restored.parts[0].state.status === "completed");

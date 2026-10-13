@@ -65,6 +65,13 @@ input.on("line", (line) => {
   const command = JSON.parse(line);
   let data = {};
   if (command.type === "emit_event") send(command.event);
+  if (command.type === "switch_session") {
+    sessionFile = command.sessionPath;
+    records = readFileSync(sessionFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    header = records[0];
+    leaf = records.filter((record) => record.type !== "session").at(-1)?.id ?? null;
+    data = { cancelled: false };
+  }
   if (command.type === "finish_pending_turn") {
     const message = record("assistant", "completed followup");
     send({ type: "message_start", message });

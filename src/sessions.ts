@@ -370,12 +370,21 @@ export class SessionManager {
     }
   }
 
-  private async syncTree(s: ManagedSession) {
+  private async syncTree(s: ManagedSession, operation?: { messageID?: string | undefined }) {
     const pi = s.pi;
     if (!pi) throw new SessionTreeError("Session has no OmO process");
     this.ensureMessages(s);
     const admissions = s.tree.localShellTurns?.length;
-    const tree = await getEntries(pi);
+    const target = operation && (operation.messageID === undefined ? s.tree.leafId : s.tree.messageEntries[operation.messageID]);
+    let tree = await getEntries(pi);
+    if (target !== undefined && target !== null && !tree.entries.some((entry) => entry.id === target)) {
+      // Only idle user tree operations may reopen a runtime that predates its requested native entry.
+      const leaf = s.tree.leafId;
+      const response = await pi.command<{ cancelled?: boolean }>({ type: "switch_session", sessionPath: s.piPath }, 60_000);
+      if (!response.success || response.data?.cancelled) throw new SessionTreeError(response.error ?? "Native tree refresh was cancelled");
+      if (leaf !== undefined) await navigate(pi, leaf);
+      tree = await getEntries(pi);
+    }
     bindMessageEntries(s, tree);
     if (admissions) this.refreshMessageCache(s);
     this.persistMeta(s);
@@ -398,7 +407,7 @@ export class SessionManager {
 
   async fork(sessionId: string, messageID?: string): Promise<OCSession> {
     return this.treeSession(sessionId, async (s, pi) => {
-      const tree = await this.syncTree(s);
+      const tree = await this.syncTree(s, { messageID });
       const state = await forkConversation(s, pi, tree, messageID);
       this.createdSessions.set(state.sessionId, s.info.directory);
       const now = Date.now();
@@ -424,7 +433,7 @@ export class SessionManager {
 
   async revert(sessionId: string, messageID: string): Promise<OCSession> {
     return this.treeSession(sessionId, async (s, pi) => {
-      const tree = await this.syncTree(s);
+      const tree = await this.syncTree(s, { messageID });
       const previousNotice = revertNotice(s);
       if (!await revertConversation(s, pi, tree, messageID)) return s.info;
       this.removeRevertNotice(s, previousNotice);
@@ -830,7 +839,7 @@ export class SessionManager {
     const restored = s.restored;
     if (restored === undefined) throw new Error(`session is not restorable: ${s.info.id}`);
     if (!existsSync(restored.piPath)) throw new Error(`pi session file is gone: ${restored.piPath}`);
-    this.ensureMessages(s);
+    this.refreshMessageCache(s);
     await this.lifecycle.makeRoom();
     const pi = new PiRpcClient({ cwd: s.info.directory, args: ["--session", restored.piPath], clock: this.lifecycle.clock });
     const state = await pi.command<PiState>({ type: "get_state" }).catch(async (error: unknown) => {
@@ -855,8 +864,8 @@ export class SessionManager {
     this.lifecycle.touch(s);
     s.piPath = restored.piPath;
     s.piSessionId = restored.piSessionId;
-    bindMessageEntries(s, await getEntries(pi));
     if (s.tree.leafId !== undefined) s.tree.leafId = await navigate(pi, s.tree.leafId);
+    bindMessageEntries(s, await getEntries(pi));
     delete s.restored;
     s.approvals = this.approvalsFor(s);
     // A restored session pushes pi's real model to the UI rather than leaving

@@ -33,6 +33,44 @@ TimeoutStopSec=20
 The UI password remains in the existing service unit. Do not copy it into the
 drop-in or this document.
 
+## Child transcripts and empty Changes bodies
+
+OmO process-backed children report `host_session.session_path`. In-process
+children, including the `explore` agent observed during F3, instead report
+`child_session_id`; their JSONL lives in the owning task store at
+`children/<task_id>/sessions/<task_id>/<timestamp>_<child_session_id>.jsonl`.
+The connector resolves both forms, tails the transcript while the task runs,
+and archives it to `$OCPI_STATE_DIR/children/<task_id>.jsonl` at completion.
+The task record must belong to the parent session. A transcript for another
+retained run is not a substitute for the recorded child session.
+
+OpenChamber's workspace **Changes** panel is distinct from the connector's
+session-diff API. In the installed version inspected during F3:
+
+- Connector `GET /session/:id/diff` (proxied as `/api/session/:id/diff`) returns
+  `before`, `after`, counts, and a unified `patch`. Its Git invocation already
+  uses `--no-ext-diff`.
+- Workspace Changes obtains file bodies from OpenChamber's own
+  `GET /api/git/diff?directory=...&path=...`. That invocation honors
+  `diff.external`; `diff.external=difft` produces human-readable side-by-side
+  text rather than the unified patch the panel expects. Counts still work,
+  but expanding a file can show an empty body.
+
+Diagnose this by comparing the two raw responses and checking
+`git config --show-origin --get diff.external` in the affected repository.
+If the connector response has `@@` hunks but the native response has a
+`filename --- Text` header, changing connector payloads cannot repair that
+panel. The environment must provide ordinary unified Git output to
+OpenChamber, or OpenChamber's native Git invocation must disable external
+diff drivers. Keep `difft` available as an explicit terminal command instead
+of a global `diff.external` setting if both uses are needed.
+
+F3's controlled proof launched only its throwaway OpenChamber with
+`GIT_CONFIG_GLOBAL=/dev/null`: native unified hunks and the expanded panel
+returned. This is an isolation experiment, not a recommended production
+setting; it also ignores unrelated global Git settings. F3 did not change
+the user's Git configuration, installed OpenChamber, or live service.
+
 ## Upgrade to a new connector tag
 
 Keep the current deployment worktree in place while preparing the next tag in

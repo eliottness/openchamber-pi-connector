@@ -186,6 +186,61 @@ test("history prefers archive over a conflicting completed live transcript", (t)
   assert.ok(!texts(manager.messages(ocIdFor("st_child"))).includes("stale live transcript"));
 });
 
+test("in-process child_session_id streams tools and archives without host_session", async (t) => {
+  const { manager, parent, store, state, bus, directory } = setup(t);
+  const child = liveRecord(store);
+  const path = join(dirname(child.path), "2026-10-13T00-00-00-000Z_child-pi.jsonl");
+  renameSync(child.path, path);
+  // A different retained run must never be mistaken for the current session.
+  put(join(dirname(path), "2026-10-14T00-00-00-000Z_other-pi.jsonl"), transcript("other run", "other-pi"));
+  const data = {
+    task_id: "st_child", parent_session_id: "parent-pi", status: "running",
+    execution_mode: "in-process", child_session_id: "child-pi",
+  };
+  put(child.recordPath, data);
+  start(manager, parent, { subagent_type: "explore", task_summary: "In-process child" });
+  result(manager, parent, { task_id: "st_child", status: "running" }, "", false);
+  const childID = ocIdFor("st_child");
+  assert.equal(parts(manager.messages(childID)).filter((part) => part.tool === "read").length, 1);
+  assert.equal(manager.get(childID)?.status.type, "busy");
+  const streamed = eventWhen(bus, (event) => event.type === "message.part.updated" &&
+    event.properties.part.sessionID === childID && event.properties.part.type === "text" &&
+    event.properties.part.text === "IN_PROCESS_STREAM");
+  appendFileSync(path, JSON.stringify({ type: "message", id: "live", parentId: "z", timestamp: 5,
+    message: { role: "assistant", content: [{ type: "text", text: "IN_PROCESS_STREAM" }] } }) + "\n");
+  await streamed;
+  const idle = eventWhen(bus, (event) => event.type === "session.idle" && event.properties.sessionID === childID);
+  put(`${child.recordPath}.tmp`, { ...data, status: "completed" });
+  renameSync(`${child.recordPath}.tmp`, child.recordPath);
+  await idle;
+  assert.equal(readFileSync(join(state, "children", "st_child.jsonl"), "utf8"), readFileSync(path, "utf8"));
+  await manager.disposeAll();
+  rmSync(store, { recursive: true });
+  const restarted = new SessionManager(() => {}, new SessionStore(state), directory);
+  t.after(() => restarted.disposeAll());
+  assert.equal(parts(restarted.messages(childID)).filter((part) => part.tool === "read").length, 1);
+  assert.match(texts(restarted.messages(childID)), /IN_PROCESS_STREAM/);
+});
+
+test("in-process transcript discovery follows late child session publication", async (t) => {
+  const { manager, parent, store, bus } = setup(t);
+  const recordPath = join(store, "tasks", "st_child.json");
+  const data = { task_id: "st_child", parent_session_id: "parent-pi", status: "running", execution_mode: "in-process" };
+  put(recordPath, data);
+  start(manager, parent, { subagent_type: "explore", task_summary: "Starting child" });
+  result(manager, parent, { task_id: "st_child", status: "running" }, "", false);
+  const childID = ocIdFor("st_child");
+  const arrived = eventWhen(bus, (event) => event.type === "message.part.updated" &&
+    event.properties.part.sessionID === childID && event.properties.part.type === "tool" &&
+    event.properties.part.tool === "read");
+  put(join(store, "children", "st_child", "sessions", "st_child", "2026-10-13T00-00-00-000Z_child-pi.jsonl"),
+    transcript("late session"));
+  put(`${recordPath}.tmp`, { ...data, child_session_id: "child-pi" });
+  renameSync(`${recordPath}.tmp`, recordPath);
+  await arrived;
+  assert.equal(parts(manager.messages(childID)).filter((part) => part.tool === "read").length, 1);
+});
+
 test("live store history is archived even when no prior archive exists", (t) => {
   const { manager, parent, store, state } = setup(t);
   liveRecord(store, "st_child", "completed", "retained live history");

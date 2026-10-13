@@ -3,7 +3,37 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { scanAllPiSessions, scanPiSessions } from "../src/session-store.js";
+import { scanAllPiSessions, scanPiSessions, SessionPersistenceError, SessionStore } from "../src/session-store.js";
+
+test("F2 B3 failed registry writes reject essential metadata instead of acknowledging success", () => {
+  const state = "/dev/null/F2-state";
+  const store = new SessionStore(state);
+  const entry = {
+    piSessionId: "F2", piPath: "/nonexistent/F2.jsonl", directory: "/nonexistent/F2",
+    created: 1, updated: 2, parentID: "ses_parent",
+    tree: { messageEntries: {}, leafId: "reverted-leaf" },
+  };
+  assert.throws(() => store.set("ses_F2", entry), (error: unknown) =>
+    error instanceof SessionPersistenceError && error.cause instanceof Error &&
+    "code" in error.cause && error.cause.code === "ENOTDIR");
+  assert.equal(store.get("ses_F2"), undefined, "failed save must not leave a falsely persisted cache entry");
+  assert.equal(new SessionStore(state).get("ses_F2"), undefined);
+});
+
+test("F2 B3 failed registry updates and removals preserve the last committed cache", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "ocpi-store-f2-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const state = join(root, "state");
+  const store = new SessionStore(state);
+  const entry = { piSessionId: "F2", piPath: "/nonexistent/F2.jsonl", directory: root, created: 1, updated: 2 };
+  store.set("ses_F2", entry);
+  rmSync(state, { recursive: true });
+  writeFileSync(state, "not a directory");
+  assert.throws(() => store.update("ses_F2", { updated: 3 }), SessionPersistenceError);
+  assert.deepEqual(store.get("ses_F2"), entry);
+  assert.throws(() => store.remove("ses_F2"), SessionPersistenceError);
+  assert.deepEqual(store.get("ses_F2"), entry);
+});
 
 function withAgentDir(agentDir: string, run: () => void): void {
   const previous = process.env.PI_CODING_AGENT_DIR;

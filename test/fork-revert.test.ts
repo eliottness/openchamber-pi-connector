@@ -7,6 +7,8 @@ import { branchEntries, getEntries } from "../src/session-tree.js";
 import { SessionManager } from "../src/sessions.js";
 import { SessionStore } from "../src/session-store.js";
 import { AdapterServer } from "../src/server.js";
+import { announceSessionNotice, runShellCommand } from "../src/session-commands.js";
+import type { PiRpcClient } from "../src/pi-rpc.js";
 
 function setup(t: TestContext) {
   const dir = mkdtempSync(join(tmpdir(), "ocpi-t10-"));
@@ -133,6 +135,75 @@ test("compaction preserves the active revert leaf and original history across re
   assert.ok(restored?.pi);
   assert.equal((await getEntries(restored.pi)).leafId, tree.leafId);
   assert.doesNotMatch(JSON.stringify(restarted.messages(id)), /Compacted summary/);
+});
+
+test("F2 B1 history refresh waits for an in-flight unrevert and agrees with the backend", { timeout: 10_000 }, async (t) => {
+  const { manager, dir } = setup(t);
+  const { s, id, tree } = await turns(manager, dir);
+  await manager.revert(id, "msg_live_3");
+  assert.ok(s.pi);
+  const pi = s.pi;
+  const command = pi.command.bind(pi);
+  const dispatched = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let reads = 0;
+  pi.command = async <T>(...args: Parameters<PiRpcClient["command"]>) => {
+    if (args[0].type === "get_entries") reads++;
+    const response = await command<T>(...args);
+    if (args[0].type === "navigate_tree" && args[0].targetId === tree.leafId) {
+      dispatched.resolve();
+      await release.promise;
+    }
+    return response;
+  };
+  const redo = manager.unrevert(id);
+  await dispatched.promise;
+  const refresh = manager.reloadMessages(id);
+  try {
+    assert.equal(reads, 0, "refresh must not dispatch get_entries while unrevert navigation is pending");
+  } finally {
+    release.resolve();
+    await Promise.all([redo, refresh]);
+    pi.command = command;
+  }
+  const reported = await redo;
+  assert.equal(reported.revert, undefined);
+  assert.equal(s.tree.revert, undefined);
+  assert.equal(s.tree.leafId, tree.leafId);
+  assert.equal((await getEntries(pi)).leafId, s.tree.leafId);
+});
+
+test("F2 B2 shell cards and notices created after revert remain in rendered history", { timeout: 10_000 }, async (t) => {
+  const { manager, dir } = setup(t);
+  const { s, id } = await turns(manager, dir);
+  await manager.revert(id, "msg_live_3");
+  const result = await runShellCommand({ sessions: manager, session: s, command: "echo F2_SHELL_OK", emit: () => undefined });
+  assert.equal(result.kind, "completed");
+  announceSessionNotice({ sessions: manager, session: s, emit: () => undefined }, "F2_NOTICE");
+  const shellId = result.message.info.id;
+  assert.equal(result.message.info.parentID, "msg_live_2");
+  const noticeId = s.messages?.find((message) => message.parts.some((part) => part.type === "text" && part.text === "F2_NOTICE"))?.info.id;
+  assert.ok(noticeId, "notice must be appended to canonical history");
+  const retained = () => {
+    const history = manager.messages(id) ?? [];
+    assert.equal(history.filter((message) => message.info.id === shellId).length, 1);
+    assert.equal(history.filter((message) => message.info.id === noticeId).length, 1);
+    assert.equal(history.find((message) => message.info.id === shellId)?.parts[0]?.type, "tool");
+    if (s.tree.revert) {
+      assert.ok(history.findIndex((message) => message.info.id === shellId) <
+        history.findIndex((message) => message.info.id === s.tree.revert?.messageID), "shell must precede the UI cutoff");
+    }
+  };
+  retained();
+  await manager.reloadMessages(id);
+  retained();
+  await manager.unrevert(id);
+  retained();
+  await manager.revert(id, "msg_live_3");
+  await manager.prompt(id, "replacement", undefined, false, "msg_replacement");
+  retained();
+  await manager.reloadMessages(id);
+  retained();
 });
 
 test("restored offset ids support fork and reverting the first root message", async (t) => {

@@ -21,6 +21,7 @@ export interface LifecycleOptions {
   clock?: LifecycleClock;
   idleTimeoutMs?: number;
   maxLive?: number;
+  reaperIntervalMs?: number;
 }
 
 function positiveEnv(name: string, fallback: number): number {
@@ -34,6 +35,7 @@ export class SessionLifecycle {
   readonly clock: LifecycleClock;
   private readonly idleTimeoutMs: number;
   private readonly maxLive: number;
+  private readonly reaperIntervalMs: number;
   private readonly timer: ReturnType<typeof setInterval>;
   private readonly used = new WeakMap<ManagedSession, number>();
   private readonly active = new WeakMap<ManagedSession, number>();
@@ -46,9 +48,14 @@ export class SessionLifecycle {
     this.clock = options.clock ?? systemClock;
     this.idleTimeoutMs = options.idleTimeoutMs ?? positiveEnv("OCPI_IDLE_TIMEOUT_MS", 900_000);
     this.maxLive = options.maxLive ?? positiveEnv("OCPI_MAX_LIVE", 8);
+    this.reaperIntervalMs = options.reaperIntervalMs ??
+      Math.min(15_000, Math.max(1_000, Math.floor(this.idleTimeoutMs / 4)));
+    if (!Number.isSafeInteger(this.reaperIntervalMs) || this.reaperIntervalMs <= 0) {
+      throw new Error("reaperIntervalMs must be a positive integer");
+    }
     this.timer = this.clock.setInterval(() => {
       void this.reap().catch((error: unknown) => console.error("[lifecycle] reaper failed:", error));
-    }, 60_000);
+    }, this.reaperIntervalMs);
     this.timer.unref();
   }
 

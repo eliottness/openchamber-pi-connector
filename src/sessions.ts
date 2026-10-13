@@ -17,7 +17,7 @@ import { TodoBridge, type Todo, type TodoUpdated } from "./todo-bridge.js";
 import { bindMessageEntries, forkConversation, getEntries, navigate, recordTurn, revertConversation, revertNotice, SessionTreeError, unrevertConversation, type SessionTreeState } from "./session-tree.js";
 import { SubagentBridge, taskParts, updateTaskParts, taskCompletions } from "./subagents.js";
 import { sessionDiff, touchedFiles } from "./session-diff.js";
-import { announceSessionNotice, shellTitle } from "./session-commands.js";
+import { announceSessionNotice, shellTitle, shellUserMessage } from "./session-commands.js";
 import { debugLog } from "./misc-routes.js";
 import { ocIdFor, piSessionDir, piSessionsRootMtime, scanAllPiSessions, scanPiSessions, SessionPersistenceError, SessionStore, type ScannedSession } from "./session-store.js";
 import type {
@@ -1557,8 +1557,15 @@ function parsePiSessionText(s: ManagedSession, agentName: string, raw: string): 
     }
 
     if (m.role === "bashExecution") {
-      const msgId = Object.keys(s.tree.messageEntries).find((key) => s.tree.messageEntries[key] === e.id) ?? `msg_${sessionID}_r${idx}`;
-      if (e.id) s.tree.messageEntries[msgId] = e.id;
+      const mappedIds = Object.keys(s.tree.messageEntries).filter((key) => s.tree.messageEntries[key] === e.id);
+      const userId = mappedIds.find((key) => key.endsWith("u"));
+      const stem = userId?.slice(0, -1) ?? mappedIds[0] ?? `msg_${sessionID}_r${idx}`;
+      const msgId = `${stem}z`;
+      lastUserId = `${stem}u`;
+      if (e.id) {
+        s.tree.messageEntries[msgId] = e.id;
+        s.tree.messageEntries[lastUserId] = e.id;
+      }
       const command = m.command ?? "";
       const input = { command, description: command };
       const metadata = {
@@ -1578,7 +1585,8 @@ function parsePiSessionText(s: ManagedSession, agentName: string, raw: string): 
           ? { status: "error", input, error: "Command cancelled", metadata, time: { start: created, end: created } }
           : { status: "completed", input, output: m.output ?? "", title: shellTitle(command), metadata, time: { start: created, end: created } },
       };
-      out.push({ info, parts: [part] });
+      const message = { info, parts: [part] } satisfies import("./session-commands.js").ShellMessage;
+      out.push(shellUserMessage(message), message);
       continue;
     }
 

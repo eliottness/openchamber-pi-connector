@@ -63,18 +63,26 @@ test("fork without messageID copies the complete leaf including the final reply"
 
 test("persisted shell cards retain live ids through reload, fork and revert boundaries", async (t) => {
   const { manager, dir, state } = setup(t);
-  const session = await manager.create(dir);
-  const s = manager.get(session.id);
+  const { id } = await turns(manager, dir);
+  const session = { id };
+  const s = manager.get(id);
   assert.ok(s?.pi);
   const result = await runShellCommand({ sessions: manager, session: s, command: "echo bash-boundary", emit: () => {} });
   assert.equal(result.kind, "completed");
   const shellID = result.message.info.id;
-  assert.equal(manager.messages(session.id)?.length, 1, "refresh must not duplicate the live shell card");
+  const shellUserID = result.message.info.parentID;
+  assert.ok(shellUserID < shellID, "live shell IDs must preserve user-before-assistant order");
+  assert.equal(manager.messages(session.id)?.length, 8, "refresh must not duplicate the live shell pair");
   const entryID = s.tree.messageEntries[shellID];
   assert.ok(entryID);
+  assert.equal(s.tree.messageEntries[shellUserID], entryID);
   await manager.prompt(session.id, "after-shell", undefined, false, "msg_after_shell");
   await manager.revert(session.id, "msg_after_shell");
   assert.equal(s.tree.leafId, entryID, "revert must navigate to the preceding shell entry");
+  await manager.unrevert(session.id);
+  const beforeShell = (await getEntries(s.pi)).entries.find((entry) => entry.id === entryID)?.parentId;
+  await manager.revert(session.id, shellUserID);
+  assert.equal(s.tree.leafId, beforeShell);
   await manager.unrevert(session.id);
   await manager.reloadMessages(session.id);
   assert.equal(manager.messages(session.id)?.filter((m) => m.info.id === shellID).length, 1);
@@ -85,8 +93,10 @@ test("persisted shell cards retain live ids through reload, fork and revert boun
   assert.ok(shell?.parts[0]?.type === "tool" && shell.parts[0].state.status === "completed");
   const fork = await restored.fork(session.id, shellID);
   const forked = restored.messages(fork.id);
-  assert.equal(forked?.length, 1);
-  assert.ok(forked?.[0]?.parts[0]?.type === "tool");
+  assert.equal(forked?.length, 8);
+  assert.ok(forked?.at(-1)?.parts[0]?.type === "tool");
+  const before = await restored.fork(session.id, shellUserID);
+  assert.equal(restored.messages(before.id)?.length, 6, "forking a shell user boundary must exclude the shell turn");
 });
 
 test("revert navigates before the user without changing a working file and unrevert restores the exact leaf", async (t) => {
@@ -209,7 +219,7 @@ test("F2 B2 shell cards and notices created after revert remain in rendered hist
   assert.equal(result.kind, "completed");
   announceSessionNotice({ sessions: manager, session: s, emit: () => undefined }, "F2_NOTICE");
   const shellId = result.message.info.id;
-  assert.equal(result.message.info.parentID, "msg_live_2");
+  assert.equal(result.message.info.parentID, `${result.message.info.id.slice(0, -1)}u`);
   const noticeId = s.messages?.find((message) => message.parts.some((part) => part.type === "text" && part.text === "F2_NOTICE"))?.info.id;
   assert.ok(noticeId, "notice must be appended to canonical history");
   const retained = () => {

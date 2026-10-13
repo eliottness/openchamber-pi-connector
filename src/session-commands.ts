@@ -2,12 +2,13 @@ import { randomUUID } from "node:crypto";
 import { PiRpcClient } from "./pi-rpc.js";
 import { getAgentName } from "./agent-name.js";
 import type { ManagedSession, SessionManager } from "./sessions.js";
-import type { OCAssistantMessage, OCEvent, OCMessageWithParts, OCToolPart, OCTextPart } from "./types.js";
+import type { OCAssistantMessage, OCEvent, OCMessageWithParts, OCToolPart, OCTextPart, OCUserMessage } from "./types.js";
 
 export type CommandDescriptor = { name: string; description: string; template: "" };
 export type SlashCommandInput = { command: string; arguments: string };
 export type ShellResult = { output: string; exitCode: number | null; cancelled: boolean; truncated: boolean };
 export type ShellMessage = OCMessageWithParts & { info: OCAssistantMessage; parts: [OCToolPart] };
+export type ShellUserMessage = OCMessageWithParts & { info: OCUserMessage; parts: [OCTextPart] };
 
 export type ShareNoticeMessage = OCMessageWithParts & { info: OCAssistantMessage; parts: [OCTextPart] };
 
@@ -165,6 +166,8 @@ export function parseShellResult(value: unknown): ShellResult {
 
 export function createShellMessage(session: ManagedSession, command: string): ShellMessage {
   const info = assistantMessage(session);
+  info.parentID = `${info.id}u`;
+  info.id = `${info.id}z`;
   const created = info.time.created;
   const part: OCToolPart = {
     id: id("prt"),
@@ -182,6 +185,21 @@ export function createShellMessage(session: ManagedSession, command: string): Sh
     },
   };
   return { info, parts: [part] };
+}
+
+export function shellUserMessage(message: ShellMessage): ShellUserMessage {
+  const { info } = message;
+  return {
+    info: {
+      id: info.parentID, sessionID: info.sessionID, role: "user", time: { created: info.time.created },
+      agent: info.mode, model: { providerID: info.providerID, modelID: info.modelID },
+    },
+    parts: [{
+      id: `${message.parts[0].id}u`, sessionID: info.sessionID, messageID: info.parentID,
+      type: "text", text: "The following tool was executed by the user", synthetic: true,
+      time: { start: info.time.created, end: info.time.created },
+    }],
+  };
 }
 
 export function announceSessionNotice(context: ShareNoticeContext, messageText: string, error?: OCAssistantMessage["error"]): void {
@@ -250,6 +268,7 @@ export async function runShellCommand(context: ShellCommandContext): Promise<She
   const { session, sessions, command } = context;
   sessions.messages(session.info.id);
   const message = createShellMessage(session, command);
+  const user = shellUserMessage(message);
   const controller = new AbortController();
   session.cancelShell = () => {
     delete session.cancelShell;
@@ -258,8 +277,11 @@ export async function runShellCommand(context: ShellCommandContext): Promise<She
     session.pi?.notify({ type: "abort_bash" });
     controller.abort();
   };
+  sessions.appendMessage(session.info.id, user);
   sessions.appendMessage(session.info.id, message);
   setShellStatus(context, "busy");
+  shellEvent(context, { type: "message.updated", properties: { info: user.info } });
+  shellEvent(context, { type: "message.part.updated", properties: { part: user.parts[0] } });
   emitShellMessage(context, message);
   try {
     const response = await sessions.sessionRpc<unknown>(session.info.id, { type: "bash", command }, controller.signal);

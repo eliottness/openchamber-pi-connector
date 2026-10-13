@@ -518,6 +518,13 @@ export class V2EventTranslator {
   }
 
   private onTextPart(directory: string, part: Extract<OCPart, { type: "text" | "reasoning" }>, delta?: string): V2Envelope[] {
+    // Shell creates this user turn on the server; there is no optimistic prompt.
+    if (part.type === "text" && part.synthetic) {
+      return [this.frame(directory, "session.prompted", {
+        sessionID: part.sessionID, messageID: part.messageID,
+        prompt: { text: part.text }, delivery: "queue",
+      })];
+    }
     const kind = part.type;
     const st = this.state(part.sessionID);
     const mid = part.messageID;

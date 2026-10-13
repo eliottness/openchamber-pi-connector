@@ -11,16 +11,16 @@ import { SessionPersistenceError, SessionStore } from "../src/session-store.js";
 const fakeRpc = resolve("test/fixtures/fake-omo-endpoints.mjs");
 const unsupportedShare = { name: "BadRequestError", data: { message: "Sharing is not available with OmO" } };
 
-type TestEvent = { type: string; properties?: Record<string, unknown> };
+type TestEvent = { type: string; properties?: Record<string, unknown>; data?: Record<string, unknown> };
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
 
-function startEvents(url: string) {
+function startEvents(url: string, path = "/event") {
   const controller = new AbortController();
   const events = new EventEmitter();
   const history: TestEvent[] = [];
 
-  const ready = fetch(`${url}/event`, { signal: controller.signal }).then(async (response) => {
+  const ready = fetch(`${url}${path}`, { signal: controller.signal }).then(async (response) => {
     assert.equal(response.status, 200);
     assert.ok(response.body);
     const reader = response.body.getReader();
@@ -43,6 +43,7 @@ function startEvents(url: string) {
           const event: TestEvent = {
             type: parsed.type,
             ...(isRecord(parsed.properties) ? { properties: parsed.properties } : {}),
+            ...(isRecord(parsed.data) ? { data: parsed.data } : {}),
           };
           history.push(event);
           events.emit(event.type, event);
@@ -176,7 +177,7 @@ test("shell route emits a bash card with output and exit code", { timeout: 30_00
 
   const assistantUpdated = stream.waitFor(
     "message.updated",
-    (event) => JSON.stringify(event).includes(`"sessionID":"${sessionId}"`),
+    (event) => JSON.stringify(event).includes(`"sessionID":"${sessionId}"`) && JSON.stringify(event).includes('"role":"assistant"'),
   );
   const completedPart = stream.waitFor(
     "message.part.updated",
@@ -206,6 +207,28 @@ test("shell route emits a bash card with output and exit code", { timeout: 30_00
   assert.equal(v2.status, 200);
   assert.match(JSON.stringify(await v2.json()), /"exitCode":4/);
   await v2CompletedPart;
+});
+
+test("shell synthetic users arrive over v2 SSE without an optimistic prompt", { timeout: 30_000 }, async (t) => {
+  const { url } = await startServer(t);
+  const sessionId = await createSession(url);
+  const stream = startEvents(url, "/api/event");
+  t.after(stream.close);
+  await stream.ready;
+  const prompted = stream.waitFor("session.prompted", (event) => event.data?.sessionID === sessionId);
+  const shell = await fetch(`${url}/api/session/${sessionId}/shell`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ command: "echo paired" }),
+  });
+  assert.equal(shell.status, 200);
+  const event = await prompted;
+  const history: unknown = await (await fetch(`${url}/api/session/${sessionId}/message?order=asc`)).json();
+  assert.ok(isRecord(history) && Array.isArray(history.data));
+  const user: unknown = history.data.find((message: unknown) => isRecord(message) && message.type === "user");
+  assert.ok(isRecord(user));
+  assert.equal(user.type, "user");
+  assert.equal(event.data?.messageID, user.id);
+  assert.ok(isRecord(event.data?.prompt));
+  assert.equal(event.data.prompt.text, user.text);
 });
 
 test("slash command refreshes entries persisted without agent events", { timeout: 30_000 }, async (t) => {

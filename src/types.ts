@@ -64,6 +64,7 @@ export interface OCTextPart {
   messageID: string;
   type: "text";
   text: string;
+  synthetic?: boolean;
   time?: { start: number; end?: number };
 }
 

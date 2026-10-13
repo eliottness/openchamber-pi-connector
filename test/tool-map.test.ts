@@ -153,13 +153,18 @@ test("bashExecution history restores ordered terminal cards with stable ids and 
   const restored = session(piPath);
   restored.messages = undefined;
   const history = manager["ensureMessages"](restored);
-  assert.equal(history.length, 5);
-  const cards = history.slice(2);
-  assert.deepEqual(cards.map((message) => message.info.id), [2, 3, 4].map((idx) => `msg_ses_test_r${idx}`));
+  assert.equal(history.length, 8);
+  const users = history.slice(2).filter((message) => message.info.role === "user");
+  const cards = history.slice(2).filter((message) => message.info.role === "assistant");
+  assert.deepEqual(users.map((message) => message.info.id), [2, 3, 4].map((idx) => `msg_ses_test_r${idx}u`));
+  assert.deepEqual(cards.map((message) => message.info.id), [2, 3, 4].map((idx) => `msg_ses_test_r${idx}z`));
   for (const [offset, card] of cards.entries()) {
     const idx = offset + 2;
     assert.ok(card.info.role === "assistant");
-    assert.equal(card.info.parentID, "msg_ses_test_r0");
+    assert.equal(card.info.parentID, users[offset]?.info.id);
+    assert.ok(card.info.parentID < card.info.id, "client ID ordering must place the shell user before its assistant");
+    const userPart = users[offset]?.parts[0];
+    assert.ok(userPart?.type === "text" && userPart.synthetic === true);
     assert.deepEqual(card.info.time, { created: 1000 + idx, completed: 1000 + idx });
     assert.equal(card.parts.length, 1);
     const part = card.parts[0];
@@ -171,6 +176,7 @@ test("bashExecution history restores ordered terminal cards with stable ids and 
     assert.ok(part.state.status !== "pending");
     assert.deepEqual(part.state.time, { start: 1000 + idx, end: 1000 + idx });
     assert.equal(restored.tree.messageEntries[card.info.id], `e${idx}`);
+    assert.equal(restored.tree.messageEntries[card.info.parentID], `e${idx}`);
   }
   const [success, cancelled, failed] = cards.map((card) => card.parts[0]);
   assert.ok(success?.type === "tool" && success.state.status === "completed");
@@ -189,7 +195,7 @@ test("bashExecution history restores ordered terminal cards with stable ids and 
   assert.deepEqual(manager["ensureMessages"](restored), history);
 });
 
-test("a shell-only persisted session restores a parentless assistant bash card", async (t) => {
+test("a shell-only persisted session restores a synthetic user and linked assistant bash card", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "ocpi-bash-only-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const piPath = join(dir, "session.jsonl");
@@ -202,10 +208,11 @@ test("a shell-only persisted session restores a parentless assistant bash card",
   const restored = session(piPath);
   restored.messages = undefined;
   const history = manager["ensureMessages"](restored);
-  assert.equal(history.length, 1);
-  const card = history[0];
+  assert.equal(history.length, 2);
+  assert.equal(history[0]?.info.role, "user");
+  const card = history[1];
   assert.ok(card?.info.role === "assistant");
-  assert.equal(card.info.parentID, "");
+  assert.equal(card.info.parentID, history[0]?.info.id);
   const v2 = toV2Message(card);
   assert.equal(v2.type, "assistant");
   assert.equal(v2.content?.[0]?.name, "bash");

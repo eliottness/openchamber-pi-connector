@@ -126,6 +126,13 @@ export class SmokeContext {
     this.sourceAgent = process.env.PI_CODING_AGENT_DIR ?? "/home/eliott/.omo/agent";
     this.shutdownSignal = shutdownSignal;
     for (const directory of [this.work, this.state, this.agent]) mkdirSync(directory, { recursive: true, mode: 0o700 });
+    // Detached task hosts do not inherit the wrapper's CLI flags. Seed OmO's
+    // private first-run marker so their first turn is the requested smoke task,
+    // not onboarding. This never touches the user's agent directory.
+    const onboardingState = join(this.agent, "omo-senpi", "omo-native");
+    mkdirSync(onboardingState, { recursive: true, mode: 0o700 });
+    writeFileSync(join(onboardingState, "onboarding-completed"),
+      JSON.stringify({ completedAt: new Date().toISOString(), version: 1 }), { mode: 0o600 });
     // Copy, never symlink, mutable credentials/config. No sessions or memory are copied.
     for (const file of ["auth.json", "settings.json", "models.json", "models-store.json", "credential-pool-state.json", "trust.json", "mcp.json"]) {
       const source = join(this.sourceAgent, file);
@@ -282,7 +289,20 @@ export class SmokeContext {
 
   idle(signal: AbortSignal, timeoutMs = 120_000): Promise<SmokeEvent> {
     const id = this.sessionId();
-    return this.waitForEvent((event) => event.type === "session.idle" && event.properties.sessionID === id, timeoutMs, signal);
+    return this.waitForEvent((event) => event.type === "session.idle" &&
+      event.properties.sessionID === id, timeoutMs, signal);
+  }
+
+  turnIdle(signal: AbortSignal, timeoutMs = 120_000): Promise<SmokeEvent> {
+    const id = this.sessionId();
+    let busy = false;
+    return this.waitForEvent((event) => {
+      if (event.type === "session.status" && event.properties.sessionID === id &&
+          event.properties.status.type === "busy") {
+        busy = true;
+      }
+      return busy && event.type === "session.idle" && event.properties.sessionID === id;
+    }, timeoutMs, signal);
   }
 
   delta(signal: AbortSignal): Promise<SmokeEvent> {

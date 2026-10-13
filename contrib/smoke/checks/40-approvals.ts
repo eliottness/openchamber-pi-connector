@@ -42,7 +42,7 @@ export function register(check: Check, context: SmokeContext): void {
           event.properties.part.sessionID === sessionID && event.properties.part.type === "tool" &&
           event.properties.part.tool === "read" && event.properties.part.state.status ===
             (reply === "once" ? "completed" : "error"), 180_000, attemptSignal);
-        const idle = context.idle(attemptSignal, 180_000);
+        const idle = context.turnIdle(attemptSignal, 180_000);
         await context.prompt(`${attempt === 0 ? "" : "Smoke-test precondition: you MUST call the read tool even if you think you know the file. "}` +
           `Use the read tool directly exactly once on ${file}. Do not use other tools or delegate. ` +
           "If permission is denied, report that denial and stop without retrying.", signal);

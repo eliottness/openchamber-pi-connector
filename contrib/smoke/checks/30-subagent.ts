@@ -22,7 +22,7 @@ export function register(check: Check, context: SmokeContext): void {
       event.properties.part.type === "tool" && event.properties.part.sessionID !== parent &&
       event.properties.part.tool === "read" &&
       event.properties.part.state.status === "completed", 290_000, signal);
-    const idle = context.idle(signal, 290_000);
+    const idle = context.turnIdle(signal, 290_000);
     const running = context.waitForEvent((event) => event.type === "message.part.updated" &&
       event.properties.part.sessionID === parent && event.properties.part.type === "tool" &&
       event.properties.part.tool === "task" && event.properties.part.state.status === "running", 290_000, signal);

@@ -30,7 +30,7 @@ export function register(check: Check, context: SmokeContext): void {
     const first = `FIRST-${context.marker}`;
     const last = `LAST-${context.marker}`;
     const file = join(context.work, "revert-keeps-file.txt");
-    const firstIdle = context.idle(signal);
+    const firstIdle = context.turnIdle(signal);
     await context.prompt(`Reply with ${first} only. Do not use tools.`, signal);
     await firstIdle;
     await waitForSettledIdle();
@@ -39,7 +39,7 @@ export function register(check: Check, context: SmokeContext): void {
     const write = context.waitForEvent((event) => event.type === "message.part.updated" &&
       event.properties.part.sessionID === id && event.properties.part.type === "tool" &&
       event.properties.part.tool === "write" && event.properties.part.state.status === "completed", 120_000, signal);
-    const lastIdle = context.idle(signal);
+    const lastIdle = context.turnIdle(signal);
     await context.prompt(`Use write directly to create ${file} with exact content ${last}. Do not delegate. Then reply ${last} and stop.`, signal);
     await Promise.all([write, lastIdle]);
     await waitForSettledIdle();

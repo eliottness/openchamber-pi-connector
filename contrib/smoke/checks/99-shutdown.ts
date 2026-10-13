@@ -11,5 +11,5 @@ export function register(check: Check, context: SmokeContext): void {
     await context.stop(signal);
     await death;
     context.assertShutdownProcesses();
-  }, { dependsOn: ["fork-revert"] });
+  }, { dependsOn: ["routes"] });
 }

@@ -23,16 +23,30 @@ then terminates those hosts. A workspace-owned detached OmO LSP daemon is also
 reported as INFO and terminated by scoped cleanup; session RPCs and unknown
 processes remain strict shutdown failures. Inherited RPC socket, watchdog, and
 cleanup-path variables are stripped so QA cannot attach to the caller's host.
-The isolated HOME also passes OmO's documented onboarding-disable CLI flag:
-the smoke tests product behavior, not the first-run tour, and an onboarding
-turn would otherwise race the checks' prompt-specific idle events.
+The isolated HOME passes OmO's documented onboarding-disable CLI flag and
+seeds the private onboarding-completed marker for detached task hosts, which do
+not inherit wrapper CLI flags. The smoke tests product behavior, not the
+first-run tour, and an onboarding turn would otherwise race prompt-specific
+idle events or be archived instead of the requested child-task transcript.
 
 Part B1 adds tool-card input/history checks, phased todos, one foreground quick
 subagent with live child tools and an archived transcript, allow-once and deny
 approvals, and conversation-only fork/revert/unrevert with a file SHA256 check.
-The approval check temporarily restarts with `--permission-preset ask`; it does
-not change any configuration file. Compact/shell/commands/share and diff/routes
-checks are reserved for part B2.
+The approval check temporarily restarts with `--permission-preset ask` and an
+explicit `--permission read=ask` rule, because copied rules override presets.
+It does not change any configuration file.
+
+Part B2 checks the non-empty command catalog, shell output and exit codes,
+unavailable sharing, populated/empty compaction, and the new compaction entry
+in HTTP history. A private Git fixture checks tracked and untracked file diffs
+and their post-turn SSE snapshot. The HTTP route sweep reads method/path pairs
+from `docs/omo-endpoint-inventory.md`; live permission/question requests supply
+real IDs for lifecycle routes. Routes marked observed/called must never return
+404/501. Static-only SDK routes are informational but must not return 500; the
+run prints their exact statuses for evidence. Unsupported called capabilities
+must return 400 rather than fabricated successful mutations. Shutdown depends
+on the entire check chain. Final acceptance is two consecutive unfiltered runs
+with every check PASS and zero SKIPs.
 
 ## Part B extension
 

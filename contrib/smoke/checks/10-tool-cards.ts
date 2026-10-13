@@ -18,7 +18,7 @@ export function register(check: Check, context: SmokeContext): void {
     for (let attempt = 0; attempt < 2 && selected === undefined; attempt++) {
       const before = (await context.messages(signal)).length;
       const eventStart = context.sse.events.length;
-      const idle = context.idle(signal, 180_000);
+      const idle = context.turnIdle(signal, 180_000);
       await context.prompt(`${attempt === 0 ? "" : "Smoke-test precondition: you MUST use all three named tools even if the file already exists. "}` +
         `Use the write tool to overwrite ${file} with exact content "BEFORE-${context.marker}\\n". ` +
         "Then use the read tool on that file. Then use the edit tool (not apply_patch, bash, or eval) " +

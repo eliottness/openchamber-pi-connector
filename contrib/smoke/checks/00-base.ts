@@ -39,7 +39,7 @@ export function register(check: Check, context: SmokeContext): void {
 
   check("prompt", async (signal) => {
     const delta = context.delta(signal);
-    const idle = context.idle(signal);
+    const idle = context.turnIdle(signal);
     await context.prompt(`Remember this exact token for later: ${context.marker}. Reply with that token only. Do not use tools.`, signal);
     await Promise.all([delta, idle]);
     const messages = await context.messages(signal);
@@ -80,7 +80,7 @@ export function register(check: Check, context: SmokeContext): void {
     await context.stop(signal);
     await context.start(signal, true, 30_000);
     const delta = context.delta(signal);
-    const idle = context.idle(signal);
+    const idle = context.turnIdle(signal);
     await context.prompt("Reply with the exact token I asked you to remember earlier. Do not use tools.", signal);
     await Promise.all([delta, idle]);
     const pids = context.agentPids();
@@ -90,7 +90,7 @@ export function register(check: Check, context: SmokeContext): void {
     assert.equal(context.agentPids().length, 0, "idle OmO processes must disappear before revival");
     const before = await context.messages(signal);
     const nextDelta = context.delta(signal);
-    const nextIdle = context.idle(signal);
+    const nextIdle = context.turnIdle(signal);
     await context.prompt("Reply with the exact token I asked you to remember earlier. Do not use tools.", signal);
     await Promise.all([nextDelta, nextIdle]);
     const after = await context.messages(signal);

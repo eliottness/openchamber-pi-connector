@@ -10,7 +10,7 @@ export function register(check: Check, context: SmokeContext): void {
       event.properties.sessionID === context.sessionId() &&
       event.properties.todos.length === 2 && event.properties.todos.some((todo) => todo.status === "completed"),
     180_000, signal);
-    const idle = context.idle(signal, 180_000);
+    const idle = context.turnIdle(signal, 180_000);
     await context.prompt('Use the todo tool directly with op init and list [{phase:"Preparation",items:["Inspect smoke fixture for todo bridge"]},{phase:"Delivery",items:["Report smoke fixture verification result"]}]. Then use todo op done task "Inspect smoke fixture for todo bridge". Keep the second item open. Do not do any other work, do not delegate, and stop after these two todo calls.', signal);
     const event = await updated;
     await idle;

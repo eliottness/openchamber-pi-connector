@@ -17,7 +17,7 @@ import { TodoBridge, type Todo, type TodoUpdated } from "./todo-bridge.js";
 import { bindMessageEntries, forkConversation, getEntries, navigate, recordTurn, revertConversation, revertNotice, SessionTreeError, unrevertConversation, type SessionTreeState } from "./session-tree.js";
 import { SubagentBridge, taskParts, updateTaskParts, taskCompletions } from "./subagents.js";
 import { sessionDiff, touchedFiles } from "./session-diff.js";
-import { announceSessionNotice } from "./session-commands.js";
+import { announceSessionNotice, shellTitle } from "./session-commands.js";
 import { debugLog } from "./misc-routes.js";
 import { ocIdFor, piSessionDir, piSessionsRootMtime, scanAllPiSessions, scanPiSessions, SessionPersistenceError, SessionStore, type ScannedSession } from "./session-store.js";
 import type {
@@ -55,7 +55,7 @@ export interface ManagedSession extends ThinkingState {
   pi: PiRpcClient | undefined;
   /** undefined for dormant sessions until history is parsed from the JSONL. */
   messages: OCMessageWithParts[] | undefined;
-  /** Adapter-authored cards are never bound to OmO conversation entries. */
+  /** Adapter-authored notices/errors remain local; persisted shell cards can be bound. */
   localMessageIds?: Set<string>;
   status: OCSessionStatus;
   /** undefined while dormant; resolved via get_state on create/revive. */
@@ -466,13 +466,14 @@ export class SessionManager {
     if (!pi) throw new SessionTreeError("Session cannot be resumed");
     const tree = await getEntries(pi, signal);
     signal?.throwIfAborted();
+    bindMessageEntries(s, tree);
     // Compact/bash and extension slash commands can append without agent_end.
     // Follow their leaf unless reverted; keep both the history and RPC cursor pinned.
     if (!s.tree.revert) s.tree.leafId = tree.leafId;
     else if (s.tree.leafId !== undefined && tree.leafId !== s.tree.leafId) await navigate(pi, s.tree.leafId, signal);
     signal?.throwIfAborted();
     const previous = new Map((s.messages ?? []).map((message) => [message.info.id, message]));
-    // Adapter-only shell/error cards have no JSONL entry; retain them on reload.
+    // Notices and shell failures without a JSONL entry remain local.
     const local = [...previous.values()].filter((message) => s.tree.messageEntries[message.info.id] === undefined);
     s.messages = undefined;
     const messages = this.ensureMessages(s).map((message) => previous.get(message.info.id) ?? message);
@@ -1438,6 +1439,12 @@ interface PiFileMessage {
   toolName?: string;
   isError?: boolean;
   details?: unknown;
+  command?: string;
+  output?: string;
+  exitCode?: number | null;
+  cancelled?: boolean;
+  truncated?: boolean;
+  fullOutputPath?: string;
 }
 
 function entryTime(e: PiFileEntry): number {
@@ -1546,6 +1553,32 @@ function parsePiSessionText(s: ManagedSession, agentName: string, raw: string): 
         { id: `prt_${sessionID}_r${idx}_0`, sessionID, messageID: msgId, type: "text", text, time: { start: created, end: created } },
       ];
       out.push({ info, parts });
+      continue;
+    }
+
+    if (m.role === "bashExecution") {
+      const msgId = Object.keys(s.tree.messageEntries).find((key) => s.tree.messageEntries[key] === e.id) ?? `msg_${sessionID}_r${idx}`;
+      if (e.id) s.tree.messageEntries[msgId] = e.id;
+      const command = m.command ?? "";
+      const input = { command, description: command };
+      const metadata = {
+        exitCode: m.exitCode ?? null, cancelled: m.cancelled === true, truncated: m.truncated === true,
+        ...(m.fullOutputPath !== undefined ? { fullOutputPath: m.fullOutputPath } : {}),
+      };
+      const info: OCAssistantMessage = {
+        id: msgId, sessionID, role: "assistant", time: { created, completed: created },
+        parentID: lastUserId, modelID: currentModel.modelID, providerID: currentModel.providerID,
+        mode: agentName, path: { cwd: directory, root: directory }, cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      };
+      const part: OCToolPart = {
+        id: `prt_${sessionID}_r${idx}_0`, sessionID, messageID: msgId,
+        type: "tool", tool: "bash", callID: `call_${sessionID}_r${idx}_0`,
+        state: m.cancelled === true
+          ? { status: "error", input, error: "Command cancelled", metadata, time: { start: created, end: created } }
+          : { status: "completed", input, output: m.output ?? "", title: shellTitle(command), metadata, time: { start: created, end: created } },
+      };
+      out.push({ info, parts: [part] });
       continue;
     }
 

@@ -10,6 +10,7 @@ import { SessionStore } from "../src/session-store.js";
 import { ocIdFor } from "../src/session-store.js";
 import { stripTaskSuffix } from "../src/subagents.js";
 import type { OCToolPart } from "../src/types.js";
+import { toV2Message } from "../src/v2.js";
 
 const fixtures = join(process.cwd(), "test/fixtures/omo-tools");
 const keys: Record<string, string[]> = {
@@ -131,6 +132,84 @@ function comparable(part: OCToolPart): unknown {
   const { id, messageID, ...rest } = part;
   return JSON.parse(JSON.stringify(rest));
 }
+
+test("bashExecution history restores ordered terminal cards with stable ids and stored output", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "ocpi-bash-history-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const piPath = join(dir, "session.jsonl");
+  const messages = [
+    { role: "user", content: [{ type: "text", text: "hello" }] },
+    { role: "assistant", content: [{ type: "text", text: "reply" }], provider: "fake", model: "fake-model" },
+    { role: "bashExecution", command: "echo hi", output: "hi\n", exitCode: 0, cancelled: false, truncated: false },
+    { role: "bashExecution", command: "sleep 600", output: "", cancelled: true, truncated: false },
+    { role: "bashExecution", command: "exit 3", output: "stored output\n", exitCode: 3, cancelled: false, truncated: true, fullOutputPath: "/tmp/full-output" },
+  ];
+  writeFileSync(piPath, messages.map((message, idx) => JSON.stringify({
+    type: "message", id: `e${idx}`, parentId: idx === 0 ? null : `e${idx - 1}`,
+    message: { ...message, timestamp: 1000 + idx },
+  })).join("\n"));
+  const manager = new SessionManager(() => {}, new SessionStore(join(dir, "state")));
+  t.after(() => manager.disposeAll());
+  const restored = session(piPath);
+  restored.messages = undefined;
+  const history = manager["ensureMessages"](restored);
+  assert.equal(history.length, 5);
+  const cards = history.slice(2);
+  assert.deepEqual(cards.map((message) => message.info.id), [2, 3, 4].map((idx) => `msg_ses_test_r${idx}`));
+  for (const [offset, card] of cards.entries()) {
+    const idx = offset + 2;
+    assert.ok(card.info.role === "assistant");
+    assert.equal(card.info.parentID, "msg_ses_test_r0");
+    assert.deepEqual(card.info.time, { created: 1000 + idx, completed: 1000 + idx });
+    assert.equal(card.parts.length, 1);
+    const part = card.parts[0];
+    assert.ok(part?.type === "tool");
+    assert.equal(part.id, `prt_ses_test_r${idx}_0`);
+    assert.equal(part.tool, "bash");
+    assert.deepEqual(part.state.input, { command: messages[idx]?.command, description: messages[idx]?.command });
+    assert.notEqual(part.state.status, "pending");
+    assert.ok(part.state.status !== "pending");
+    assert.deepEqual(part.state.time, { start: 1000 + idx, end: 1000 + idx });
+    assert.equal(restored.tree.messageEntries[card.info.id], `e${idx}`);
+  }
+  const [success, cancelled, failed] = cards.map((card) => card.parts[0]);
+  assert.ok(success?.type === "tool" && success.state.status === "completed");
+  assert.equal(success.state.title, "bash: echo hi");
+  assert.equal(success.state.output, "hi\n");
+  assert.deepEqual(success.state.metadata, { exitCode: 0, cancelled: false, truncated: false });
+  assert.ok(cancelled?.type === "tool" && cancelled.state.status === "error");
+  assert.equal(cancelled.state.error, "Command cancelled");
+  assert.equal(cancelled.state.metadata?.cancelled, true);
+  assert.equal(cancelled.state.metadata?.truncated, false);
+  assert.ok(failed?.type === "tool" && failed.state.status === "completed");
+  assert.equal(failed.state.output, "stored output\n");
+  assert.deepEqual(failed.state.metadata, { exitCode: 3, cancelled: false, truncated: true, fullOutputPath: "/tmp/full-output" });
+  assert.deepEqual(cards.map((card) => toV2Message(card).type), ["assistant", "assistant", "assistant"]);
+  restored.messages = undefined;
+  assert.deepEqual(manager["ensureMessages"](restored), history);
+});
+
+test("a shell-only persisted session restores a parentless assistant bash card", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "ocpi-bash-only-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const piPath = join(dir, "session.jsonl");
+  writeFileSync(piPath, JSON.stringify({
+    type: "message", id: "bash-only", parentId: null, timestamp: 1234,
+    message: { role: "bashExecution", command: "echo hi", output: "hi\n", exitCode: 0, cancelled: false, truncated: false },
+  }));
+  const manager = new SessionManager(() => {}, new SessionStore(join(dir, "state")));
+  t.after(() => manager.disposeAll());
+  const restored = session(piPath);
+  restored.messages = undefined;
+  const history = manager["ensureMessages"](restored);
+  assert.equal(history.length, 1);
+  const card = history[0];
+  assert.ok(card?.info.role === "assistant");
+  assert.equal(card.info.parentID, "");
+  const v2 = toV2Message(card);
+  assert.equal(v2.type, "assistant");
+  assert.equal(v2.content?.[0]?.name, "bash");
+});
 
 for (const executionEvents of [true, false]) {
 test(`real RPC ${executionEvents ? "execution" : "turn_end-only"} events and JSONL history produce identical tool parts`, (t) => {

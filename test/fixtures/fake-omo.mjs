@@ -110,10 +110,17 @@ input.on("line", (line) => {
     data = model;
   }
   if (command.type === "compact") record("assistant", "Compacted summary");
-  if (command.type === "bash") data = {
-    output: execSync(command.command, { cwd: process.cwd(), encoding: "utf8" }),
-    exitCode: 0, cancelled: false, truncated: false,
-  };
+  if (command.type === "bash") {
+    data = {
+      output: execSync(command.command, { cwd: process.cwd(), encoding: "utf8" }),
+      exitCode: 0, cancelled: false, truncated: false,
+    };
+    const entry = { type: "message", id: randomUUID(), parentId: leaf, timestamp: Date.now(),
+      message: { role: "bashExecution", command: command.command, ...data } };
+    leaf = entry.id;
+    records.push(entry);
+    appendFileSync(sessionFile, JSON.stringify(entry) + "\n");
+  }
   if (command.type === "prompt") {
     record("user", command.message);
     send({ type: "agent_start" });

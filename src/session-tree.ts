@@ -13,7 +13,7 @@ export interface TreeEntry {
   type: string;
   id: string;
   parentId: string | null;
-  message?: { role: string; content?: Array<{ type: string; text?: string }> };
+  message?: { role: string; content?: Array<{ type: string; text?: string }>; command?: string };
 }
 
 export interface Entries {
@@ -52,7 +52,7 @@ export function branchEntries(tree: Entries, leafId = tree.leafId): TreeEntry[] 
 /** Live ids belong to the UI; restored ids belong to JSONL offsets. Save both. */
 export function bindMessageEntries(s: ManagedSession, tree: Entries): void {
   const entries = branchEntries(tree, s.tree.revert ? s.tree.revert.previousLeafId : tree.leafId)
-    .filter((entry) => entry.type === "message" && (entry.message?.role === "user" || entry.message?.role === "assistant"));
+    .filter((entry) => entry.type === "message" && (entry.message?.role === "user" || entry.message?.role === "assistant" || entry.message?.role === "bashExecution"));
   const messages = s.messages ?? [];
   let cursor = 0;
   for (const entry of entries) {
@@ -62,13 +62,16 @@ export function bindMessageEntries(s: ManagedSession, tree: Entries): void {
       continue;
     }
     const text = entry.message?.content?.filter((part) => part.type === "text").map((part) => part.text ?? "").join("");
+    const shell = entry.message?.role === "bashExecution";
     const index = messages.findIndex((message, i) => i >= cursor &&
-      !s.localMessageIds?.has(message.info.id) &&
-      s.tree.messageEntries[message.info.id] === undefined && message.info.role === entry.message?.role &&
+      (shell || !s.localMessageIds?.has(message.info.id)) &&
+      s.tree.messageEntries[message.info.id] === undefined && message.info.role === (shell ? "assistant" : entry.message?.role) &&
+      (!shell || message.parts.some((part) => part.type === "tool" && part.tool === "bash" && part.state.input.command === entry.message?.command)) &&
       (message.info.role !== "user" || message.parts.filter((part) => part.type === "text").map((part) => part.text).join("") === text));
     const message = messages[index];
     if (message) {
       s.tree.messageEntries[message.info.id] = entry.id;
+      if (shell) s.localMessageIds?.delete(message.info.id);
       cursor = index + 1;
     }
   }
@@ -90,7 +93,7 @@ export async function forkConversation(s: ManagedSession, pi: PiRpcClient, tree:
   const entry = messageID === undefined ? branchEntries(tree).at(-1) : entryForMessage(s, tree, messageID);
   if (!entry) throw new SessionTreeError("Cannot fork an empty conversation");
   const response = await pi.command<{ cancelled?: boolean }>({
-    type: "fork", entryId: entry.id, ...(messageID === undefined ? { position: "at" } : {}),
+    type: "fork", entryId: entry.id, ...(messageID === undefined || entry.message?.role === "bashExecution" ? { position: "at" } : {}),
   });
   if (!response.success) throw new SessionTreeError(response.error ?? "OmO fork failed");
   if (response.data?.cancelled) throw new SessionTreeError("Conversation fork was cancelled");

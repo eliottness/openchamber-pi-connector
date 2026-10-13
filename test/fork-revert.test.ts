@@ -61,6 +61,34 @@ test("fork without messageID copies the complete leaf including the final reply"
   assert.equal(manager.messages(child.id)?.at(-1)?.info.role, "assistant");
 });
 
+test("persisted shell cards retain live ids through reload, fork and revert boundaries", async (t) => {
+  const { manager, dir, state } = setup(t);
+  const session = await manager.create(dir);
+  const s = manager.get(session.id);
+  assert.ok(s?.pi);
+  const result = await runShellCommand({ sessions: manager, session: s, command: "echo bash-boundary", emit: () => {} });
+  assert.equal(result.kind, "completed");
+  const shellID = result.message.info.id;
+  assert.equal(manager.messages(session.id)?.length, 1, "refresh must not duplicate the live shell card");
+  const entryID = s.tree.messageEntries[shellID];
+  assert.ok(entryID);
+  await manager.prompt(session.id, "after-shell", undefined, false, "msg_after_shell");
+  await manager.revert(session.id, "msg_after_shell");
+  assert.equal(s.tree.leafId, entryID, "revert must navigate to the preceding shell entry");
+  await manager.unrevert(session.id);
+  await manager.reloadMessages(session.id);
+  assert.equal(manager.messages(session.id)?.filter((m) => m.info.id === shellID).length, 1);
+  await manager.disposeAll();
+  const restored = new SessionManager(() => {}, new SessionStore(state), dir);
+  t.after(() => restored.disposeAll());
+  const shell = restored.messages(session.id)?.find((m) => m.info.id === shellID);
+  assert.ok(shell?.parts[0]?.type === "tool" && shell.parts[0].state.status === "completed");
+  const fork = await restored.fork(session.id, shellID);
+  const forked = restored.messages(fork.id);
+  assert.equal(forked?.length, 1);
+  assert.ok(forked?.[0]?.parts[0]?.type === "tool");
+});
+
 test("revert navigates before the user without changing a working file and unrevert restores the exact leaf", async (t) => {
   const { manager, dir } = setup(t);
   const { s, id, tree } = await turns(manager, dir);

@@ -44,7 +44,7 @@ function id(prefix: string): string {
   return `${prefix}_${randomUUID().replaceAll("-", "")}`;
 }
 
-function shellTitle(command: string): string {
+export function shellTitle(command: string): string {
   const short = command.length > 60 ? `${command.slice(0, 57)}…` : command;
   return `bash: ${short}`;
 }

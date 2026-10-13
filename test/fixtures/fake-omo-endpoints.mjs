@@ -111,6 +111,7 @@ input.on("line", (line) => {
       });
       send({ type: "message_end", message: assistant });
       send({ type: "agent_end" });
+      send({ type: "agent_idle" });
       reply(command, true, {});
       return;
     }

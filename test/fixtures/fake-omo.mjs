@@ -54,6 +54,7 @@ const branch = (target = leaf) => {
 input.on("line", (line) => {
   const command = JSON.parse(line);
   let data = {};
+  if (command.type === "emit_event") send(command.event);
   if (command.type === "get_entries") data = { entries: records.filter((r) => r.type !== "session"), leafId: leaf };
   if (command.type === "get_tree") {
     const nodes = records.filter((r) => r.type !== "session").map((entry) => ({ entry, children: [] }));
@@ -97,11 +98,25 @@ input.on("line", (line) => {
   if (command.type === "prompt") {
     record("user", command.message);
     send({ type: "agent_start" });
+    if (["pending-question", "pending-permission", "pending-turn"].includes(command.message)) {
+      if (command.message !== "pending-turn") send({
+        type: "extension_ui_request", id: "pending", method: "select",
+        title: command.message === "pending-question" ? "Choose?" : "Permission required: read",
+        options: command.message === "pending-question" ? ["A", "B"] : ["Allow once", "Allow always", "Deny", "Deny with feedback"],
+      });
+      send({ type: "response", id: command.id, command: command.type, success: true, data });
+      return;
+    }
     const message = record("assistant", `history:${branch().filter((r) => r.type === "message").length};${command.message}`);
     send({ type: "message_start", message });
     send({ type: "message_update", assistantMessageEvent: { type: "text_end", contentIndex: 0, content: message.content[0].text } });
     send({ type: "message_end", message });
     send({ type: "agent_end" });
+    send({ type: "agent_idle" });
+  }
+  if (command.type === "abort") {
+    send({ type: "agent_end" });
+    send({ type: "agent_idle" });
   }
   send({ type: "response", id: command.id, command: command.type, success: true, data });
 });

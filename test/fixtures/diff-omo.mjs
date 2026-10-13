@@ -45,6 +45,7 @@ input.on("line", (line) => {
     for (const call of content) record({ role: "toolResult", toolCallId: call.id, toolName: call.name, isError: false,
       content: [{ type: "text", text: "written" }] });
     send({ type: "agent_end" });
+    send({ type: "agent_idle" });
   }
   send({ type: "response", id: command.id, command: command.type, success: true, data });
 });

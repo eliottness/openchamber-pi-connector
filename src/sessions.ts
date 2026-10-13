@@ -749,7 +749,6 @@ export class SessionManager {
     // Extension commands can finish without starting an agent turn.
     if (res.data !== null && typeof res.data === "object" && "disposition" in res.data && res.data.disposition === "handled") {
       this.setStatus(s, { type: "idle" });
-      this.emit(s.info.directory, { type: "session.idle", properties: { sessionID: s.info.id } });
     }
 
     // First message makes pi write the session file — bind it now so the
@@ -964,6 +963,9 @@ export class SessionManager {
       type: "session.status",
       properties: { sessionID: s.info.id, status },
     });
+    if (status.type === "idle") {
+      this.emit(s.info.directory, { type: "session.idle", properties: { sessionID: s.info.id } });
+    }
   }
 
   private emitPart(s: ManagedSession, part: OCPart, delta?: string): void {
@@ -1001,13 +1003,17 @@ export class SessionManager {
         s.info.time.updated = Date.now();
         this.persistMeta(s);
         this.emit(dir, { type: "session.updated", properties: { info: s.info } });
-        this.setStatus(s, { type: "idle" });
-        this.emit(dir, { type: "session.idle", properties: { sessionID: s.info.id } });
         if (s.piPath !== undefined) this.store.update(s.info.id, { updated: Date.now() });
         recordTurn(s);
         this.persistMeta(s);
         break;
       }
+
+      case "agent_idle":
+        // agent_end closes one run, not the session: OmO may still retry or
+        // start a deferred continuation. Only agent_idle settles that work.
+        this.setStatus(s, { type: "idle" });
+        break;
 
       case "turn_end": {
         s.approvals?.finishTurn();

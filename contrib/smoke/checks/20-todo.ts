@@ -16,14 +16,21 @@ export function register(check: Check, context: SmokeContext): void {
     await idle;
     assert.equal(event.type, "todo.updated");
     if (event.type !== "todo.updated") assert.fail("wrong todo event");
+    assert.notEqual(event.properties.todos[1]?.status, "completed",
+      "the completed-first-task snapshot must retain the still-open second item");
+    const snapshots = context.sse.events.flatMap((entry): Todo[][] =>
+      entry.type === "todo.updated" && entry.properties.sessionID === context.sessionId()
+        ? [entry.properties.todos]
+        : []);
+    const latest = snapshots.at(-1);
+    assert.ok(latest, "todo.updated must publish a final snapshot before idle");
     const todos = await context.api<Todo[]>(`/session/${context.sessionId()}/todo`, signal);
-    assert.deepEqual(todos, event.properties.todos, "GET todo must equal the completed SSE snapshot");
+    assert.deepEqual(todos, latest, "GET todo must equal the latest SSE snapshot at idle");
     assert.deepEqual(todos.map((todo) => todo.content), [
       "Preparation: Inspect smoke fixture for todo bridge",
       "Delivery: Report smoke fixture verification result",
     ]);
     assert.equal(todos[0]?.status, "completed");
-    assert.notEqual(todos[1]?.status, "completed");
     assert.ok(todos.every((todo) => /^[a-f0-9]{16}$/.test(todo.id)));
     const parts = (await context.messages(signal)).slice(before).flatMap((message) => message.parts);
     assert.ok(parts.some((part) => part.type === "tool" && part.tool === "todowrite" &&
